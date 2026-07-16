@@ -1,0 +1,272 @@
+# CodeNet Cross-Language Inconsistency Evaluation
+
+An evaluation framework (Python + Apptainer) that uses an LLM to find **inputs
+for [IBM Project CodeNet](https://github.com/IBM/Project_CodeNet) samples that
+make implementations in different programming languages produce different
+outputs**.
+
+For a given problem, CodeNet contains accepted submissions in many languages.
+They are all supposed to solve the same task, yet subtle differences — integer
+overflow, integer vs. floating-point division, rounding, default output
+precision, input parsing, off-by-one edge cases — can make them disagree on
+some inputs. This framework samples problems, sends each language pair to an LLM
+(via [OpenRouter](https://openrouter.ai/)), asks it to find such a diverging
+input, and can then **actually execute both programs** to confirm the claim.
+
+---
+
+## Pipeline
+
+```
+download  ──►  sample  ──►  run (LLM + verify)  ──►  report
+   │             │                  │                    │
+CodeNet     manifest.jsonl     results.jsonl        summary.json
+```
+
+1. **download** – fetch and extract CodeNet into `data/`.
+2. **sample** – find every problem that has an (accepted) submission in *all*
+   configured languages, then randomly pick **X %** of them (default 1 %).
+3. **run** – for each sampled problem, build the configured **language pairs**
+   and ask the LLM to detect an inconsistency and provide a diverging input.
+   If verification is enabled, both programs are compiled/run on that input and
+   the outputs are compared.
+4. **report** – aggregate `results.jsonl` into summary statistics.
+
+All persistent data — the CodeNet dataset **and** every result — lives under a
+single `data/` directory (configurable via `data_dir`).
+
+---
+
+## Requirements addressed
+
+| # | Requirement | Where |
+|---|-------------|-------|
+| 1 | Download CodeNet | `download` command / `download.py` |
+| 2 | Choose languages in config (default C, Python, Java) | `languages:` in `config.yaml` |
+| 3 | Randomly sample X % of samples (default 1 %) | `sampling.percent` / `sampling.py` |
+| 4 | Send all language pairs to a configurable LLM via OpenRouter | `pairing` + `llm` config / `llm.py` |
+| 5 | All persistent data under a configurable `data/` folder | `data_dir` / everything writes under it |
+
+**On requirement 4 — how many requests?** The default `pairing.strategy:
+reference` compares one reference language against each of the others, i.e.
+`n − 1` pairs → **two requests for three languages**, matching the brief. Set
+`pairing.strategy: all` to instead compare every unordered pair
+(`n·(n−1)/2`).
+
+---
+
+## Quick start (no download needed)
+
+The framework ships a synthetic demo dataset so you can try the full pipeline
+without the ~40 GiB download:
+
+```bash
+pip install -e .                      # or: pip install -r requirements.txt
+export OPENROUTER_API_KEY=sk-or-...
+
+codenet-eval --data-dir ./data demo   # write a tiny synthetic dataset
+codenet-eval --data-dir ./data -c config/config.yaml \
+    --log-level INFO all --run-name demo1
+```
+
+The demo contains deliberately inconsistent pairs (integer vs. float division,
+32-bit overflow) and a consistent one, so you can see detections **and**
+execution-verified confirmations/refutations.
+
+Preview prompts/costs without spending tokens by adding `--dry-run` to `run`.
+
+---
+
+## Real run
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+
+# 1. Download + extract CodeNet (large!). Resumable; safe to re-run.
+codenet-eval -c config/config.yaml download
+
+# 2+3+4+5. Sample 1% of eligible problems, query the LLM, verify, report.
+codenet-eval -c config/config.yaml all
+```
+
+Or step by step:
+
+```bash
+codenet-eval -c config/config.yaml sample --run-name run1
+codenet-eval -c config/config.yaml run    --run-name run1 --limit 50   # cost cap
+codenet-eval -c config/config.yaml report --run-name run1
+```
+
+`run` is **resumable**: re-running skips language pairs already present in
+`results.jsonl`. Use `--limit N` to bound the number of API calls per invocation.
+
+---
+
+## Apptainer
+
+The container bundles the framework **and** the C / C++ / Python / Java
+toolchains, so execution-verification works out of the box.
+
+```bash
+# Build the image (needs apptainer/singularity):
+apptainer build codenet-eval.sif apptainer/codenet-eval.def
+
+# Run — data/ is bind-mounted so results persist on the host:
+export OPENROUTER_API_KEY=sk-or-...
+apptainer run --bind "$PWD/data:$PWD/data" \
+    --env "OPENROUTER_API_KEY=$OPENROUTER_API_KEY" \
+    codenet-eval.sif -c config/config.yaml all
+```
+
+`scripts/run.sh <args>` is a convenience wrapper that uses the `.sif` if present
+and falls back to a native Python run otherwise.
+
+---
+
+## Configuration
+
+Everything is driven by a YAML file (see [`config/config.yaml`](config/config.yaml)).
+A partial file is fine — omitted fields fall back to built-in defaults. Key
+fields:
+
+```yaml
+data_dir: ./data                 # (5) root for dataset + all results
+
+languages:                       # (2) which languages to compare (>= 2)
+  - C
+  - Python
+  - Java
+
+sampling:
+  percent: 1.0                   # (3) X% of eligible problems
+  seed: 42                       #     reproducible sampling
+  max_samples: null              #     optional hard cap
+  require_accepted: true
+
+pairing:
+  strategy: reference            # reference (n-1) | all (n*(n-1)/2)
+  reference_language: C
+
+llm:                             # (4) OpenRouter model + request settings
+  model: anthropic/claude-3.5-sonnet
+  base_url: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY
+  temperature: 0.0
+  max_tokens: 2048
+  json_mode: true
+
+verification:
+  enabled: true                  # execute both programs to confirm divergence
+  run_timeout_seconds: 10
+  memory_limit_mb: 1024
+
+output:
+  results_dir: results           # relative to data_dir
+  run_name: null                 # null -> timestamped run directory
+```
+
+Override `data_dir` and `log_level` from the command line with `--data-dir` and
+`--log-level`.
+
+### API key
+
+The OpenRouter key is read from the environment variable named by
+`llm.api_key_env` (default `OPENROUTER_API_KEY`). It is never written to disk or
+into results.
+
+---
+
+## Output format
+
+Each run produces a directory under `data/results/<run_name>/`:
+
+| file | contents |
+|------|----------|
+| `config.snapshot.yaml` | the exact effective config used |
+| `manifest.jsonl` | one line per sampled problem: chosen submissions + language pairs |
+| `results.jsonl` | one line per language pair (LLM verdict + verification) |
+| `summary.json` | aggregate statistics (`report`) |
+
+A `results.jsonl` row looks like:
+
+```json
+{
+  "problem_id": "p03050",
+  "language_a": "C", "submission_a": "s123",
+  "language_b": "Python", "submission_b": "s456",
+  "model": "anthropic/claude-3.5-sonnet",
+  "inconsistent": true,
+  "confidence": 0.86,
+  "category": "integer_vs_float_division",
+  "reasoning": "C truncates a/b; Python 3 returns a float.",
+  "divergence_input": "7 2\n",
+  "expected_output_a": "3",
+  "expected_output_b": "3.5",
+  "verification": {
+    "status": "confirmed",
+    "outputs_differ": true,
+    "program_a": {"stdout": "3", "...": "..."},
+    "program_b": {"stdout": "3.5", "...": "..."}
+  }
+}
+```
+
+Verification `status` is `confirmed` (outputs really differ), `refuted` (they
+match — LLM false positive), `inconclusive` (a program failed to compile/run or
+timed out), or `skipped`.
+
+---
+
+## Dataset notes
+
+The default `dataset.url` is the full Project CodeNet archive
+(`Project_CodeNet.tar.gz`, ~40 GiB compressed, hundreds of GiB extracted). It
+contains the `metadata/`, `data/`, `problem_descriptions/` and
+`derived/input_output/` trees this framework reads.
+
+* The download is **resumable** (HTTP range) and re-running `download` is a
+  no-op once `metadata/` exists.
+* Set `dataset.checksum_sha256` to verify archive integrity.
+* Use `--no-keep-archive` to delete the tarball after extraction and save space.
+* For a quick functional test without the download, use `codenet-eval demo`.
+
+> Note: IBM's smaller *benchmark* tarballs (e.g. `Project_CodeNet_Java250`) use
+> a different, code-only layout and do **not** carry the per-problem metadata
+> this pipeline relies on. Use the full archive (or the demo) for real runs.
+
+---
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest -q
+```
+
+The test suite builds a small synthetic CodeNet tree on disk and exercises
+config merging/validation, sampling, pairing, metadata parsing, prompt/JSON
+parsing, the OpenRouter client (with a stubbed HTTP layer), archive extraction,
+and the end-to-end runner — including **real** C/Python/Java compilation and
+output comparison in the verification step.
+
+### Layout
+
+```
+src/codenet_eval/
+  config.py         # YAML config model + validation
+  download.py       # resumable download + safe extraction
+  dataset.py        # read metadata / submissions / descriptions / sample I/O
+  sampling.py       # reproducible X% sampling
+  pairing.py        # language-pair strategies
+  prompts.py        # LLM prompt construction
+  llm.py            # OpenRouter (OpenAI-compatible) client + JSON parsing
+  verification.py   # compile & run programs, compare outputs (sandboxed)
+  runner.py         # orchestration (sample -> query -> verify -> store)
+  report.py         # aggregate results into summary
+  demo.py           # synthetic dataset generator
+  cli.py            # argparse entry point
+apptainer/codenet-eval.def
+config/config.yaml
+scripts/run.sh
+tests/
+```

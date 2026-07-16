@@ -1,0 +1,73 @@
+# ===========================================================================
+# CodeNet cross-language inconsistency evaluation -- default configuration.
+#
+# Copy this file, edit what you need, and pass it with:
+#     codenet-eval --config config/config.yaml <command>
+# Any field you omit falls back to the built-in default shown here.
+# ===========================================================================
+
+# Root for ALL persistent data: the downloaded CodeNet dataset AND all results.
+data_dir: ./data
+
+# Languages to compare. Must match CodeNet's language labels exactly.
+# (e.g. "C", "C++", "Python", "Java", "Go", "Ruby", ...). At least two.
+languages:
+  - C
+  - Python
+  - Java
+
+log_level: INFO
+
+dataset:
+  # Full Project CodeNet archive (large!). See README for smaller benchmark
+  # subsets you can drop in here for a quick end-to-end test.
+  url: https://dax-cdn.cdn.appdomain.cloud/dax-project-codenet/1.0.0/Project_CodeNet.tar.gz
+  archive_name: Project_CodeNet.tar.gz
+  root_name: Project_CodeNet
+  checksum_sha256: null   # optional integrity check after download
+
+sampling:
+  percent: 1.0            # X% of eligible problems (default 1%)
+  seed: 42                # reproducible sampling
+  max_samples: null       # optional hard cap on number of problems
+  require_accepted: true  # only use "Accepted" submissions as representatives
+
+pairing:
+  # "reference": compare reference_language vs every other language (n-1 pairs;
+  #              two requests for three languages -- the default).
+  # "all":       compare every language pair (n*(n-1)/2 pairs).
+  strategy: reference
+  reference_language: C
+
+llm:
+  provider: openrouter
+  model: anthropic/claude-3.5-sonnet
+  base_url: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY   # env var holding your OpenRouter key
+  temperature: 0.0
+  max_tokens: 2048
+  request_timeout: 120
+  max_retries: 4
+  retry_backoff: 2.0
+  max_code_chars: 16000             # per-submission truncation to bound tokens
+  include_problem_description: true # include statement + sample I/O in prompt
+  json_mode: true                   # request response_format=json_object
+  extra_headers: {}                 # e.g. {HTTP-Referer: ..., X-Title: ...}
+
+verification:
+  # Execute both programs on the LLM's proposed input and check they really
+  # diverge. Needs gcc / python3 / javac+java (all in the Apptainer image).
+  enabled: true
+  run_timeout_seconds: 10
+  compile_timeout_seconds: 30
+  max_output_bytes: 100000
+  memory_limit_mb: 1024
+  python_bin: python3
+  gcc_bin: gcc
+  gpp_bin: g++
+  javac_bin: javac
+  java_bin: java
+
+output:
+  results_dir: results   # relative to data_dir (so results live under data/)
+  run_name: null         # null -> a timestamped run directory is created

@@ -1,0 +1,68 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+# ===========================================================================
+# Apptainer image for the CodeNet inconsistency evaluation framework.
+#
+# Build:
+#     apptainer build codenet-eval.sif apptainer/codenet-eval.def
+#
+# Run (data/ and results/ live on the host under ./data):
+#     export OPENROUTER_API_KEY=sk-or-...
+#     apptainer run --bind "$PWD/data:$PWD/data" codenet-eval.sif \
+#         --config config/config.yaml all
+#
+# The image bundles the Python framework plus the C, C++, Python and Java
+# toolchains so the (optional) execution-verification step works out of the box.
+# ===========================================================================
+
+%files
+    src /opt/codenet-eval/src
+    config /opt/codenet-eval/config
+    pyproject.toml /opt/codenet-eval/pyproject.toml
+    requirements.txt /opt/codenet-eval/requirements.txt
+    README.md /opt/codenet-eval/README.md
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-venv \
+        gcc g++ \
+        default-jdk \
+        ca-certificates wget
+    update-ca-certificates
+    pip3 install --no-cache-dir --upgrade pip
+    pip3 install --no-cache-dir /opt/codenet-eval
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+
+%runscript
+    exec python3 -m codenet_eval.cli "$@"
+
+%test
+    python3 -m codenet_eval.cli --help >/dev/null && echo "CLI OK"
+    gcc --version >/dev/null && echo "gcc OK"
+    javac -version 2>&1 | grep -qi javac && echo "javac OK"
+
+%labels
+    Name codenet-eval
+    Version 0.1.0
+    Description LLM-based cross-language inconsistency detection for IBM Project CodeNet
+
+%help
+    CodeNet cross-language inconsistency evaluation framework.
+
+    Commands (pass after 'apptainer run codenet-eval.sif'):
+      download   Download and extract CodeNet into data/
+      sample     Sample X% of eligible problems -> manifest.jsonl
+      run        Query the LLM per language pair -> results.jsonl
+      report     Summarise a run
+      all        download + sample + run + report
+
+    Set OPENROUTER_API_KEY in the environment before running 'run'/'all'.
