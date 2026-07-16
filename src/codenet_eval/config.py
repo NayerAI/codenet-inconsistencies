@@ -16,11 +16,13 @@ from typing import Any, Optional
 import yaml
 
 # --- Default dataset location -------------------------------------------------
-# The full IBM Project CodeNet archive.  It is large (~40 GiB compressed); the
-# README documents smaller benchmark tarballs that plug into the same pipeline.
+# The full IBM Project CodeNet archive (7.8 GB compressed) on IBM Cloud Object
+# Storage. IBM decommissioned the old dax-cdn.cdn.appdomain.cloud CDN; this
+# codait-cos-dax S3 endpoint is the URL currently published in the official
+# IBM/Project_CodeNet README.
 DEFAULT_DATASET_URL = (
-    "https://dax-cdn.cdn.appdomain.cloud/dax-project-codenet/1.0.0/"
-    "Project_CodeNet.tar.gz"
+    "https://codait-cos-dax.s3.us.cloud-object-storage.appdomain.cloud/"
+    "dax-project-codenet/1.0.0/Project_CodeNet.tar.gz"
 )
 
 

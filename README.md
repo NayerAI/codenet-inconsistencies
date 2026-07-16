@@ -58,7 +58,7 @@ reference` compares one reference language against each of the others, i.e.
 ## Quick start (no download needed)
 
 The framework ships a synthetic demo dataset so you can try the full pipeline
-without the ~40 GiB download:
+without the 7.8 GB download:
 
 ```bash
 pip install -e .                      # or: pip install -r requirements.txt
@@ -117,7 +117,7 @@ ways around it:
    ```bash
    # login node (has internet):
    wget -O data/Project_CodeNet.tar.gz \
-     https://dax-cdn.cdn.appdomain.cloud/dax-project-codenet/1.0.0/Project_CodeNet.tar.gz
+     https://codait-cos-dax.s3.us.cloud-object-storage.appdomain.cloud/dax-project-codenet/1.0.0/Project_CodeNet.tar.gz
    # compute node (offline):
    codenet-eval extract          # or: codenet-eval download --offline
    ```
@@ -251,10 +251,21 @@ timed out), or `skipped`.
 ## Dataset notes
 
 The default `dataset.url` is the full Project CodeNet archive
-(`Project_CodeNet.tar.gz`, ~40 GiB compressed, hundreds of GiB extracted). It
-contains the `metadata/`, `data/`, `problem_descriptions/` and
+(`Project_CodeNet.tar.gz`, 7.8 GB compressed, ~180 GB extracted), served from
+IBM Cloud Object Storage:
+
+```
+https://codait-cos-dax.s3.us.cloud-object-storage.appdomain.cloud/dax-project-codenet/1.0.0/Project_CodeNet.tar.gz
+```
+
+It contains the `metadata/`, `data/`, `problem_descriptions/` and
 `derived/input_output/` trees this framework reads.
 
+* **URL note:** IBM decommissioned the old `dax-cdn.cdn.appdomain.cloud` CDN
+  that early docs reference; the `codait-cos-dax` S3 endpoint above is the URL
+  currently published in the [official IBM/Project_CodeNet README](https://github.com/IBM/Project_CodeNet#download-the-dataset).
+  If IBM moves it again, just set `dataset.url` accordingly (or point it at a
+  local file / `file://` path).
 * The download is **resumable** (HTTP range) and re-running `download` is a
   no-op once `metadata/` exists.
 * Set `dataset.checksum_sha256` to verify archive integrity.

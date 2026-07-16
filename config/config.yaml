@@ -19,9 +19,10 @@ languages:
 log_level: INFO
 
 dataset:
-  # Full Project CodeNet archive (large!). See README for smaller benchmark
-  # subsets you can drop in here for a quick end-to-end test.
-  url: https://dax-cdn.cdn.appdomain.cloud/dax-project-codenet/1.0.0/Project_CodeNet.tar.gz
+  # Full Project CodeNet archive (7.8 GB compressed) on IBM Cloud Object Storage.
+  # (The old dax-cdn.cdn.appdomain.cloud CDN was decommissioned by IBM.)
+  # May also be a local path or file:// URL to extract without downloading.
+  url: https://codait-cos-dax.s3.us.cloud-object-storage.appdomain.cloud/dax-project-codenet/1.0.0/Project_CodeNet.tar.gz
   archive_name: Project_CodeNet.tar.gz
   root_name: Project_CodeNet
   checksum_sha256: null   # optional integrity check after download
