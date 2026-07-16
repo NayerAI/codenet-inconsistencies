@@ -1,4 +1,5 @@
 import shutil
+import threading
 
 import pytest
 
@@ -15,9 +16,11 @@ class FakeClient:
 
     def __init__(self):
         self.calls = 0
+        self._lock = threading.Lock()
 
     def complete(self, messages):
-        self.calls += 1
+        with self._lock:
+            self.calls += 1
         user = messages[1]["content"]
         if "Problem id: p00001" in user:
             parsed = {
@@ -108,3 +111,43 @@ def test_resume_skips_completed_pairs(mini_config, tmp_path):
     summary = summarise(run_dir)
     assert summary["total_requests"] == 4
     assert summary["inconsistent"] == 2  # both p00001 pairs
+
+
+@pytest.mark.skipif(not TOOLCHAINS, reason="gcc + python3 required")
+def test_parallel_evaluation_produces_all_results(mini_config, tmp_path):
+    # More pairs than workers, plus real compilation in the verification step,
+    # exercises concurrent writes and thread-safety.
+    mini_config.pairing.strategy = "all"  # 3 pairs per problem -> 6 total
+    runner = Runner(mini_config)
+    run_dir = tmp_path / "run"
+    runner.sample(run_dir)
+
+    client = FakeClient()
+    runner.evaluate(run_dir, client, workers=4)
+    results = list(read_jsonl(run_dir / "results.jsonl"))
+
+    assert client.calls == 6
+    assert len(results) == 6
+    # No pair is written twice despite concurrency.
+    keys = {(r["problem_id"], r["language_a"], r["language_b"]) for r in results}
+    assert len(keys) == 6
+
+    summary = summarise(run_dir)
+    assert summary["total_requests"] == 6
+    # p00001 (3 pairs) inconsistent; verification confirms the C/Python-style
+    # divergences and refutes the same-integer-semantics ones.
+    assert summary["inconsistent"] == 3
+
+
+def test_workers_config_and_override(mini_config, tmp_path):
+    # execution.workers default plus an explicit --workers-style override.
+    assert mini_config.execution.workers == 4
+    mini_config.execution.workers = 2
+    runner = Runner(mini_config)
+    run_dir = tmp_path / "run"
+    runner.sample(run_dir)
+    # workers=1 forces the sequential path; result set must be identical.
+    runner.evaluate(run_dir, client=None, workers=1)  # dry-run, no API
+    results = list(read_jsonl(run_dir / "results.jsonl"))
+    assert len(results) == 4
+    assert all(r.get("dry_run") for r in results)

@@ -69,6 +69,13 @@ verification:
   javac_bin: javac
   java_bin: java
 
+execution:
+  # Parallel workers for the evaluation stage (one LLM request + its optional
+  # verification per task). 1 = sequential. The work is I/O-bound (HTTP +
+  # subprocess), so threads help a lot. Too high may hit the provider's rate
+  # limits (the client retries 429s). Override per run with --workers N.
+  workers: 4
+
 output:
   results_dir: results   # relative to data_dir (so results live under data/)
   run_name: null         # null -> a timestamped run directory is created

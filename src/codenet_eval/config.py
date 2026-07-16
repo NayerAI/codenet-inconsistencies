@@ -98,6 +98,15 @@ class VerificationConfig:
 
 
 @dataclass
+class ExecutionConfig:
+    # Number of parallel workers for the evaluation stage (one LLM request plus
+    # its optional verification per task). 1 = fully sequential. Because the
+    # work is I/O-bound (HTTP + subprocess), threads parallelise it well.
+    # Too high may trip the LLM provider's rate limits (the client retries 429s).
+    workers: int = 4
+
+
+@dataclass
 class OutputConfig:
     # Results directory, relative to ``data_dir`` (or absolute).
     results_dir: str = "results"
@@ -116,6 +125,7 @@ class Config:
     pairing: PairingConfig = field(default_factory=PairingConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     verification: VerificationConfig = field(default_factory=VerificationConfig)
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
     # --- derived paths -------------------------------------------------------
@@ -167,6 +177,7 @@ class Config:
             pairing=PairingConfig(**data.get("pairing", {})),
             llm=LLMConfig(**data.get("llm", {})),
             verification=VerificationConfig(**data.get("verification", {})),
+            execution=ExecutionConfig(**data.get("execution", {})),
             output=OutputConfig(**data.get("output", {})),
         )
 
@@ -188,6 +199,8 @@ class Config:
             raise ValueError("Duplicate entries in 'languages'")
         if not (0 < self.sampling.percent <= 100):
             raise ValueError("sampling.percent must be in (0, 100]")
+        if self.execution.workers < 1:
+            raise ValueError("execution.workers must be >= 1")
         if self.pairing.strategy not in ("reference", "all"):
             raise ValueError("pairing.strategy must be 'reference' or 'all'")
         if self.pairing.strategy == "reference":

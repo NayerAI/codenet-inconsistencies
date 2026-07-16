@@ -13,6 +13,8 @@ and resumable:
 from __future__ import annotations
 
 import datetime as _dt
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -143,6 +145,7 @@ class Runner:
         client: Optional[OpenRouterClient],
         limit: Optional[int] = None,
         resume: bool = True,
+        workers: Optional[int] = None,
     ) -> Path:
         manifest = self.load_manifest(run_dir)
         results_path = run_dir / RESULTS_NAME
@@ -150,23 +153,57 @@ class Runner:
         if done:
             log.info("Resuming: %d pairs already completed", len(done))
 
-        processed = 0
+        # Assemble the pending work (pairs not yet done), honouring the limit.
+        pending: list[tuple[str, dict, str, str]] = []
         for pid, submissions, lang_a, lang_b in self._iter_pairs(manifest):
-            key = _pair_key(pid, lang_a, lang_b)
-            if key in done:
+            if _pair_key(pid, lang_a, lang_b) in done:
                 continue
-            if limit is not None and processed >= limit:
-                log.info("Reached limit of %d requests; stopping", limit)
-                break
+            pending.append((pid, submissions, lang_a, lang_b))
+        if limit is not None:
+            pending = pending[:limit]
 
-            row = self._evaluate_pair(pid, submissions, lang_a, lang_b, client)
-            append_jsonl(results_path, row)
-            done.add(key)
-            processed += 1
-            self._log_pair_result(row)
+        workers = max(1, workers if workers is not None else self.cfg.execution.workers)
+        if not pending:
+            log.info("Nothing to evaluate (all %d pairs already done)", len(done))
+            return results_path
 
-        log.info("Evaluation finished: %d new results -> %s", processed, results_path)
+        log.info("Evaluating %d pairs with %d worker(s)", len(pending), workers)
+        write_lock = threading.Lock()
+
+        def handle(task: tuple[str, dict, str, str]) -> None:
+            pid, submissions, lang_a, lang_b = task
+            row = self._safe_evaluate_pair(pid, submissions, lang_a, lang_b, client)
+            with write_lock:
+                append_jsonl(results_path, row)
+                self._log_pair_result(row)
+
+        if workers == 1:
+            for task in pending:
+                handle(task)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                # list() forces us to surface any unexpected worker exception.
+                list(pool.map(handle, pending))
+
+        log.info("Evaluation finished: %d new results -> %s", len(pending), results_path)
         return results_path
+
+    def _safe_evaluate_pair(self, pid, submissions, lang_a, lang_b, client) -> dict:
+        """Never raise: a worker crash must not abort the whole pool/run."""
+        try:
+            return self._evaluate_pair(pid, submissions, lang_a, lang_b, client)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.exception("Unexpected error evaluating %s %s/%s", pid, lang_a, lang_b)
+            return {
+                "problem_id": pid,
+                "language_a": lang_a,
+                "language_b": lang_b,
+                "submission_a": submissions.get(lang_a, {}).get("submission_id"),
+                "submission_b": submissions.get(lang_b, {}).get("submission_id"),
+                "model": self.cfg.llm.model,
+                "timestamp": _now(),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
 
     def _evaluate_pair(
         self,

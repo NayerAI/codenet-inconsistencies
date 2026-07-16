@@ -46,6 +46,11 @@ class OpenRouterClient:
             )
         self.endpoint = cfg.base_url.rstrip("/") + "/chat/completions"
         self.session = requests.Session()
+        # Size the connection pool for concurrent evaluation workers so we don't
+        # churn connections. requests.Session is safe to share across threads.
+        adapter = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=64)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     def _headers(self) -> dict[str, str]:
         headers = {

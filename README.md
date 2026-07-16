@@ -204,6 +204,9 @@ verification:
   run_timeout_seconds: 10
   memory_limit_mb: 1024
 
+execution:
+  workers: 4                     # parallel workers for the evaluation stage
+
 output:
   results_dir: results           # relative to data_dir
   run_name: null                 # null -> timestamped run directory
@@ -211,6 +214,22 @@ output:
 
 Override `data_dir` and `log_level` from the command line with `--data-dir` and
 `--log-level`.
+
+### Parallelism
+
+The evaluation stage runs `execution.workers` tasks concurrently (one LLM
+request plus its optional verification per task). The work is I/O-bound (HTTP +
+subprocess), so this scales close to linearly until you hit the LLM provider's
+rate limits — the client retries `429`s with backoff. Set it in the config or
+override per invocation:
+
+```bash
+codenet-eval -c config/config.yaml run --workers 16
+```
+
+`workers: 1` is fully sequential. Results are keyed by `(problem, lang_a,
+lang_b)`, so parallel runs stay resumable and never double-write a pair; only
+the *order* of lines in `results.jsonl` becomes non-deterministic.
 
 ### API key
 

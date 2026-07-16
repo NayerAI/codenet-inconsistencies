@@ -207,7 +207,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         log.info("Sampling problems for run %s", run_dir.name)
         runner.sample(run_dir)
     client = None if args.dry_run else _make_client(cfg)
-    runner.evaluate(run_dir, client, limit=args.limit, resume=not args.no_resume)
+    runner.evaluate(
+        run_dir, client, limit=args.limit, resume=not args.no_resume, workers=args.workers
+    )
     if not args.dry_run:
         summary = summarise(run_dir)
         write_summary(run_dir, summary)
@@ -237,7 +239,9 @@ def cmd_all(args: argparse.Namespace) -> int:
     run_dir = _resolve_run_dir(cfg, args.run_name, create=True)
     runner.sample(run_dir)
     client = None if args.dry_run else _make_client(cfg)
-    runner.evaluate(run_dir, client, limit=args.limit, resume=not args.no_resume)
+    runner.evaluate(
+        run_dir, client, limit=args.limit, resume=not args.no_resume, workers=args.workers
+    )
     if not args.dry_run:
         summary = summarise(run_dir)
         write_summary(run_dir, summary)
@@ -292,6 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--dry-run", action="store_true", help="Build prompts but do not call the API.")
     p_run.add_argument("--no-resume", action="store_true", help="Ignore existing results.jsonl.")
     p_run.add_argument("--sample", action="store_true", help="Force (re)sampling before running.")
+    p_run.add_argument("--workers", type=int, default=None, help="Parallel workers (overrides execution.workers).")
     p_run.set_defaults(func=cmd_run)
 
     p_report = sub.add_parser("report", help="Summarise a completed run.")
@@ -303,6 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--limit", type=int, default=None)
     p_all.add_argument("--dry-run", action="store_true")
     p_all.add_argument("--no-resume", action="store_true")
+    p_all.add_argument("--workers", type=int, default=None, help="Parallel workers (overrides execution.workers).")
     p_all.add_argument("--no-keep-archive", action="store_true")
     p_all.add_argument(
         "--offline", action="store_true",

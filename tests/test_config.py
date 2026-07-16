@@ -10,6 +10,7 @@ def test_defaults():
     assert cfg.pairing.strategy == "reference"
     assert cfg.llm.provider == "openrouter"
     assert cfg.verification.enabled is True
+    assert cfg.execution.workers == 4
 
 
 def test_partial_override_merges(tmp_path):
@@ -43,6 +44,7 @@ def test_derived_paths():
         {"sampling": {"percent": 150}},             # out of range
         {"pairing": {"strategy": "nonsense"}},      # unknown strategy
         {"pairing": {"reference_language": "Go"}},  # ref not in languages
+        {"execution": {"workers": 0}},              # need >= 1
     ],
 )
 def test_validation_rejects_bad_config(bad):
