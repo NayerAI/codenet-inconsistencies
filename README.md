@@ -135,22 +135,35 @@ Note: the OpenRouter `run`/`all` step always needs outbound HTTPS to
 
 ## Apptainer
 
-The container bundles the framework **and** the C / C++ / Python / Java
-toolchains, so execution-verification works out of the box.
+The image contains **only the runtime** — Python + dependencies and the
+C / C++ / Python / Java toolchains (so execution-verification works out of the
+box). The framework **code is not baked in**: it is read at run time from this
+repo's `./src`, which Apptainer mounts automatically. **Editing the code never
+requires rebuilding the image** — rebuild only when `requirements.txt` or the
+toolchains change.
 
 ```bash
-# Build the image (needs apptainer/singularity):
+# Build the runtime image once (from the repo root):
 apptainer build codenet-eval.sif apptainer/codenet-eval.def
 
-# Run — data/ is bind-mounted so results persist on the host:
+# Run from the repo root — ./src and ./data come from the mount:
 export OPENROUTER_API_KEY=sk-or-...
-apptainer run --bind "$PWD/data:$PWD/data" \
-    --env "OPENROUTER_API_KEY=$OPENROUTER_API_KEY" \
+apptainer run codenet-eval.sif -c config/config.yaml all
+```
+
+Apptainer auto-mounts `$HOME` and the current directory, so when the repo lives
+under `$HOME` no `--bind` is needed and `./src` / `./data` just work. Otherwise
+bind the repo explicitly and/or point at the source:
+
+```bash
+apptainer run --bind /path/to/repo \
+    --env CODENET_EVAL_SRC=/path/to/repo/src \
     codenet-eval.sif -c config/config.yaml all
 ```
 
-`scripts/run.sh <args>` is a convenience wrapper that uses the `.sif` if present
-and falls back to a native Python run otherwise.
+`scripts/run.sh <args>` is a convenience wrapper that runs the `.sif` (binding
+the repo and setting `CODENET_EVAL_SRC`) if present, and falls back to a native
+Python run otherwise.
 
 ---
 
