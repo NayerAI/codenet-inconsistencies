@@ -4,6 +4,7 @@ Subcommands::
 
     codenet-eval download   # download + extract CodeNet into data/
     codenet-eval extract    # extract an already-downloaded archive (offline)
+    codenet-eval inspect    # diagnose languages present + eligibility
     codenet-eval sample     # pick X% of eligible problems -> manifest.jsonl
     codenet-eval run        # query the LLM per language pair -> results.jsonl
     codenet-eval report     # summarise a run
@@ -111,6 +112,61 @@ def cmd_extract(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_inspect(args: argparse.Namespace) -> int:
+    from collections import Counter
+
+    from .dataset import CodeNetDataset
+
+    cfg = _load_config(args)
+    ds = CodeNetDataset(cfg)
+    if not ds.exists():
+        print(f"Dataset not found at {ds.root} (metadata/ missing).")
+        return 1
+
+    ids = ds.list_problem_ids()
+    n = min(args.max_problems, len(ids))
+    langs: Counter = Counter()
+    have_accepted: Counter = Counter()
+    have_file: Counter = Counter()
+    eligible = 0
+    for pid in ids[:n]:
+        subs = ds.read_submissions(pid)
+        accepted_langs, file_langs = set(), set()
+        for s in subs:
+            langs[s.language] += 1
+            if s.accepted:
+                accepted_langs.add(s.language)
+                if s.language not in file_langs and s.path.is_file():
+                    file_langs.add(s.language)
+        for lang in cfg.languages:
+            if lang in accepted_langs:
+                have_accepted[lang] += 1
+            if lang in file_langs:
+                have_file[lang] += 1
+        if ds.representatives(pid, cfg.languages, cfg.sampling.require_accepted):
+            eligible += 1
+
+    print(f"dataset_root       : {ds.root}")
+    print(f"data/ exists       : {ds.data_dir.is_dir()}")
+    print(f"problems (total)   : {len(ids)}")
+    print(f"scanned            : {n}")
+    print(f"languages present  : {dict(langs.most_common(20))}")
+    print(f"configured langs   : {cfg.languages}")
+    for lang in cfg.languages:
+        print(
+            f"  {lang:12s} accepted in {have_accepted[lang]:5d}/{n}"
+            f"   source file resolves in {have_file[lang]:5d}/{n}"
+        )
+    print(f"eligible in scanned: {eligible}/{n}")
+    if eligible == 0:
+        print(
+            "\nNo eligible problems in the scan. If 'source file resolves' is 0 "
+            "but 'accepted in' is not, the on-disk layout differs from expected "
+            "(check dataset_root/data/<problem>/<language>/<submission_id><.ext>)."
+        )
+    return 0
+
+
 def cmd_demo(args: argparse.Namespace) -> int:
     from .demo import build_demo_dataset
 
@@ -214,6 +270,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_extract.add_argument("--force", action="store_true", help="Re-extract even if present.")
     p_extract.set_defaults(func=cmd_extract)
+
+    p_inspect = sub.add_parser(
+        "inspect", help="Diagnose the dataset: languages present + eligibility."
+    )
+    p_inspect.add_argument("--max-problems", type=int, default=300, help="How many problems to scan.")
+    p_inspect.set_defaults(func=cmd_inspect)
 
     p_demo = sub.add_parser(
         "demo", help="Write a tiny synthetic dataset for trying the pipeline offline."

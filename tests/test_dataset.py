@@ -60,6 +60,35 @@ def test_accepted_status_is_filtered_before_sampling(tmp_path):
     assert "p10001" in eligible_all
 
 
+def test_filename_ext_without_leading_dot_resolves(tmp_path):
+    """Regression: real CodeNet stores filename_ext WITHOUT a dot (e.g. 'c'),
+    while the file on disk carries the dot ('s1.c'). The submission path must
+    still resolve -- otherwise every problem is (wrongly) filtered out."""
+    root = tmp_path / "data" / "Project_CodeNet"
+    (root / "metadata").mkdir(parents=True)
+    rows = [
+        CSV_HEADER,
+        "s1,p00007,u0,1480319506,C,C,c,Accepted,10,256,50,1.0",           # ext 'c'
+        "s2,p00007,u0,1480319506,Python,Python,py,Accepted,10,256,40,1.0",  # ext 'py'
+    ]
+    (root / "metadata" / "p00007.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    # Files on disk DO carry the dot.
+    for lang, sub, name, body in [
+        ("C", "s1", "s1.c", "int main(){}"),
+        ("Python", "s2", "s2.py", "pass"),
+    ]:
+        p = root / "data" / "p00007" / lang / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+
+    ds = CodeNetDataset(Config.from_dict({"data_dir": str(tmp_path / "data")}))
+    reps = ds.representatives("p00007", ["C", "Python"])
+    assert reps is not None
+    assert reps["C"].path.is_file()
+    assert reps["C"].filename_ext == ".c"   # normalised with the leading dot
+    assert "p00007" in dict(ds.eligible_problems(["C", "Python"]))
+
+
 def test_lists_problems_and_representatives(mini_config):
     ds = CodeNetDataset(mini_config)
     assert ds.exists()

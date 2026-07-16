@@ -31,6 +31,19 @@ log = get_logger(__name__)
 ACCEPTED_STATUS = "Accepted"
 
 
+def _normalize_ext(ext: str) -> str:
+    """Return a file extension with exactly one leading dot.
+
+    CodeNet's ``filename_ext`` column stores the extension WITHOUT a dot
+    (e.g. ``js``, ``py``, ``c``) and adds it when forming the path
+    (``s300682070.js``). We accept both conventions defensively.
+    """
+    ext = ext.strip()
+    if not ext:
+        return ""
+    return ext if ext.startswith(".") else "." + ext
+
+
 @dataclass(frozen=True)
 class Submission:
     submission_id: str
@@ -88,13 +101,14 @@ class CodeNetDataset:
             for row in reader:
                 language = (row.get("language") or "").strip()
                 sub_id = (row.get("submission_id") or "").strip()
-                ext = (row.get("filename_ext") or "").strip()
+                ext = _normalize_ext(row.get("filename_ext") or "")
                 if not (language and sub_id and ext):
                     continue
                 try:
                     code_size = int(row.get("code_size") or 0)
                 except ValueError:
                     code_size = 0
+                # CodeNet stores files as data/<problem>/<language>/<sub_id><.ext>.
                 path = self.data_dir / problem_id / language / f"{sub_id}{ext}"
                 submissions.append(
                     Submission(
@@ -119,19 +133,21 @@ class CodeNetDataset:
 
         We prefer the smallest ``Accepted`` submission (compact, likely clean),
         tie-broken by submission id for determinism, and require the source file
-        to actually exist on disk.
+        to actually exist on disk.  Files are stat-ed in preference order and the
+        first existing one wins, so we avoid stat-ing thousands of submissions.
         """
         candidates = [
             s
             for s in submissions
-            if s.language == language
-            and (s.accepted or not require_accepted)
-            and s.path.is_file()
+            if s.language == language and (s.accepted or not require_accepted)
         ]
         if not candidates:
             return None
         candidates.sort(key=lambda s: (s.code_size if s.code_size > 0 else 1 << 30, s.submission_id))
-        return candidates[0]
+        for candidate in candidates:
+            if candidate.path.is_file():
+                return candidate
+        return None
 
     def representatives(
         self,
