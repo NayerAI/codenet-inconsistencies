@@ -63,7 +63,10 @@ class Runner:
         if not eligible:
             raise RuntimeError(
                 "No problem has submissions in all selected languages. "
-                "Check the 'languages' config or the dataset."
+                "Run 'codenet-eval inspect' to see which languages are present "
+                "and whether submission source files resolve on disk. "
+                "(Also make sure you are running the latest build -- "
+                "'codenet-eval inspect' must exist; if it does not, rebuild.)"
             )
 
         chosen_ids = select_problem_ids(
