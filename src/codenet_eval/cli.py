@@ -3,6 +3,7 @@
 Subcommands::
 
     codenet-eval download   # download + extract CodeNet into data/
+    codenet-eval extract    # extract an already-downloaded archive (offline)
     codenet-eval sample     # pick X% of eligible problems -> manifest.jsonl
     codenet-eval run        # query the LLM per language pair -> results.jsonl
     codenet-eval report     # summarise a run
@@ -18,14 +19,32 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import requests
+
 from .config import Config
-from .download import ensure_dataset
+from .download import ensure_dataset, extract_archive
 from .llm import LLMError, OpenRouterClient
 from .report import format_summary, summarise, write_summary
 from .runner import Runner, default_run_name
 from .utils import get_logger, setup_logging
 
 log = get_logger("codenet_eval.cli")
+
+
+def _network_hint(cfg: Config, exc: Exception) -> None:
+    """Explain a failed download and how to work around no-internet hosts."""
+    log.error("Could not download %s: %s", cfg.dataset.url, exc)
+    sys.stderr.write(
+        "\nThe host could not reach the dataset URL (no internet / DNS, or a\n"
+        "proxy is required -- common on HPC compute nodes). Options:\n"
+        "  1. Behind a proxy? Set HTTPS_PROXY and forward it into the container:\n"
+        "       apptainer run --env HTTPS_PROXY=$HTTPS_PROXY ... download\n"
+        "  2. Download the tarball on a networked machine (login node), place it\n"
+        f"       at {cfg.archive_path}, then run:  codenet-eval extract\n"
+        "  3. Point dataset.url at the local file and run offline:\n"
+        "       dataset: {url: file:///abs/path/Project_CodeNet.tar.gz}\n"
+        "     or:  codenet-eval download --offline   (archive already in data/)\n\n"
+    )
 
 
 def _load_config(args: argparse.Namespace) -> Config:
@@ -72,7 +91,23 @@ def _latest_run_name(cfg: Config) -> Optional[str]:
 # --- command handlers --------------------------------------------------------
 def cmd_download(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
-    ensure_dataset(cfg, force=args.force, keep_archive=not args.no_keep_archive)
+    try:
+        ensure_dataset(
+            cfg,
+            force=args.force,
+            keep_archive=not args.no_keep_archive,
+            offline=args.offline,
+        )
+    except requests.exceptions.RequestException as exc:
+        _network_hint(cfg, exc)
+        return 2
+    return 0
+
+
+def cmd_extract(args: argparse.Namespace) -> int:
+    cfg = _load_config(args)
+    extract_archive(cfg, force=args.force)
+    print(f"Dataset extracted to {cfg.dataset_root}")
     return 0
 
 
@@ -135,7 +170,13 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def cmd_all(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
-    ensure_dataset(cfg, force=False, keep_archive=not args.no_keep_archive)
+    try:
+        ensure_dataset(
+            cfg, force=False, keep_archive=not args.no_keep_archive, offline=args.offline
+        )
+    except requests.exceptions.RequestException as exc:
+        _network_hint(cfg, exc)
+        return 2
     runner = Runner(cfg)
     run_dir = _resolve_run_dir(cfg, args.run_name, create=True)
     runner.sample(run_dir)
@@ -162,7 +203,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_dl = sub.add_parser("download", help="Download and extract CodeNet.")
     p_dl.add_argument("--force", action="store_true", help="Re-download / re-extract.")
     p_dl.add_argument("--no-keep-archive", action="store_true", help="Delete the tarball after extraction.")
+    p_dl.add_argument(
+        "--offline", action="store_true",
+        help="Do not access the network; extract an archive already in data/.",
+    )
     p_dl.set_defaults(func=cmd_download)
+
+    p_extract = sub.add_parser(
+        "extract", help="Extract an already-downloaded archive (no network)."
+    )
+    p_extract.add_argument("--force", action="store_true", help="Re-extract even if present.")
+    p_extract.set_defaults(func=cmd_extract)
 
     p_demo = sub.add_parser(
         "demo", help="Write a tiny synthetic dataset for trying the pipeline offline."
@@ -191,6 +242,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--dry-run", action="store_true")
     p_all.add_argument("--no-resume", action="store_true")
     p_all.add_argument("--no-keep-archive", action="store_true")
+    p_all.add_argument(
+        "--offline", action="store_true",
+        help="Do not access the network; use an archive already in data/.",
+    )
     p_all.set_defaults(func=cmd_all)
 
     return parser

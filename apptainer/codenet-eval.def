@@ -60,9 +60,16 @@ From: ubuntu:22.04
 
     Commands (pass after 'apptainer run codenet-eval.sif'):
       download   Download and extract CodeNet into data/
+      extract    Extract an already-downloaded archive (no network)
+      demo       Write a tiny synthetic dataset to try the pipeline offline
       sample     Sample X% of eligible problems -> manifest.jsonl
       run        Query the LLM per language pair -> results.jsonl
       report     Summarise a run
       all        download + sample + run + report
 
     Set OPENROUTER_API_KEY in the environment before running 'run'/'all'.
+
+    No internet on this host? The container uses the host network. Either
+    forward a proxy (--env HTTPS_PROXY=...), or pre-download the tarball into
+    data/ and run 'extract' (or 'download --offline'), or set dataset.url to a
+    local file:// path.

@@ -12,6 +12,8 @@ from __future__ import annotations
 import os
 import tarfile
 from pathlib import Path
+from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -28,10 +30,47 @@ def is_extracted(cfg: Config) -> bool:
     return (cfg.dataset_root / "metadata").is_dir()
 
 
-def download_archive(cfg: Config, force: bool = False) -> Path:
-    """Download the dataset archive with HTTP-range resume support."""
+def local_archive_path(url: str) -> Optional[Path]:
+    """If ``url`` refers to a local file (``file://`` URL or a bare path),
+    return it as a ``Path``; otherwise ``None`` for real remote URLs."""
+    parsed = urlparse(url)
+    if parsed.scheme == "file":
+        return Path(parsed.path).expanduser()
+    if parsed.scheme == "" and not parsed.netloc:
+        return Path(url).expanduser()
+    return None
+
+
+def download_archive(cfg: Config, force: bool = False, offline: bool = False) -> Path:
+    """Obtain the dataset archive and return the path to extract from.
+
+    * If ``dataset.url`` points at a local file (``file://`` or a bare path),
+      that file is used directly -- no network access.
+    * If ``offline`` is set, an already-present archive in ``data_dir`` is used
+      and the network is never touched.
+    * Otherwise the archive is downloaded over HTTP with range-resume support.
+    """
     dest = cfg.archive_path
     dest.parent.mkdir(parents=True, exist_ok=True)
+
+    local = local_archive_path(cfg.dataset.url)
+    if local is not None:
+        if not local.is_file():
+            raise FileNotFoundError(
+                f"Local dataset archive not found: {local} (from dataset.url)"
+            )
+        log.info("Using local dataset archive (no download): %s", local)
+        return local
+
+    if offline:
+        if not dest.is_file():
+            raise FileNotFoundError(
+                f"Offline mode, but no archive at {dest}. Download "
+                f"'{cfg.dataset.url}' on a networked machine, place it there, "
+                f"then re-run (or use 'extract')."
+            )
+        log.info("Offline mode: using existing archive %s (skipping network)", dest)
+        return dest
 
     if dest.exists() and not force:
         existing = dest.stat().st_size
@@ -104,13 +143,18 @@ def _is_within(directory: Path, target: Path) -> bool:
         return False
 
 
-def extract_archive(cfg: Config, force: bool = False) -> Path:
-    """Extract the archive into ``data_dir`` (guarding against path traversal)."""
+def extract_archive(
+    cfg: Config, force: bool = False, archive: Optional[Path] = None
+) -> Path:
+    """Extract the archive into ``data_dir`` (guarding against path traversal).
+
+    ``archive`` defaults to ``cfg.archive_path`` but may be any local tarball
+    (e.g. a pre-downloaded file elsewhere on disk)."""
     if is_extracted(cfg) and not force:
         log.info("Dataset already extracted at %s", cfg.dataset_root)
         return cfg.dataset_root
 
-    archive = cfg.archive_path
+    archive = archive or cfg.archive_path
     if not archive.exists():
         raise FileNotFoundError(f"Archive not found: {archive}. Run 'download' first.")
 
@@ -127,17 +171,25 @@ def extract_archive(cfg: Config, force: bool = False) -> Path:
     return cfg.dataset_root
 
 
-def ensure_dataset(cfg: Config, force: bool = False, keep_archive: bool = True) -> Path:
+def ensure_dataset(
+    cfg: Config,
+    force: bool = False,
+    keep_archive: bool = True,
+    offline: bool = False,
+) -> Path:
     """Full download+extract flow, skipping any step that is already done."""
     if is_extracted(cfg) and not force:
         log.info("Dataset present at %s (skipping download)", cfg.dataset_root)
         return cfg.dataset_root
-    download_archive(cfg, force=force)
-    root = extract_archive(cfg, force=force)
+    archive = download_archive(cfg, force=force, offline=offline)
+    root = extract_archive(cfg, force=force, archive=archive)
     if not keep_archive:
+        # Only remove the archive we manage inside data_dir -- never a local
+        # source file the user pointed us at elsewhere.
         try:
-            cfg.archive_path.unlink()
-            log.info("Removed archive %s to save space", cfg.archive_path)
+            if archive.resolve() == cfg.archive_path.resolve():
+                cfg.archive_path.unlink()
+                log.info("Removed archive %s to save space", cfg.archive_path)
         except OSError:  # pragma: no cover
             pass
     return root

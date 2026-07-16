@@ -100,6 +100,37 @@ codenet-eval -c config/config.yaml report --run-name run1
 `run` is **resumable**: re-running skips language pairs already present in
 `results.jsonl`. Use `--limit N` to bound the number of API calls per invocation.
 
+### Offline / air-gapped / behind a proxy
+
+The container uses the **host** network. On machines without direct internet
+(e.g. HPC compute nodes), the download fails with a DNS/connection error. Three
+ways around it:
+
+1. **Proxy** – if your site has an HTTP proxy, set `HTTPS_PROXY` (honoured by
+   the downloader) and forward it into the container:
+   ```bash
+   apptainer run --env "HTTPS_PROXY=$HTTPS_PROXY" --bind "$PWD/data:$PWD/data" \
+       codenet-eval.sif -c config/config.yaml download
+   ```
+2. **Pre-download, then extract offline** – fetch the tarball on a networked
+   machine (login node), drop it into `data/`, and extract without any network:
+   ```bash
+   # login node (has internet):
+   wget -O data/Project_CodeNet.tar.gz \
+     https://dax-cdn.cdn.appdomain.cloud/dax-project-codenet/1.0.0/Project_CodeNet.tar.gz
+   # compute node (offline):
+   codenet-eval extract          # or: codenet-eval download --offline
+   ```
+3. **Point at a local file** – set `dataset.url` to a local path or `file://`
+   URL; it is used directly, no download:
+   ```yaml
+   dataset:
+     url: file:///scratch/shared/Project_CodeNet.tar.gz
+   ```
+
+Note: the OpenRouter `run`/`all` step always needs outbound HTTPS to
+`openrouter.ai` (again via `HTTPS_PROXY` if applicable).
+
 ---
 
 ## Apptainer
