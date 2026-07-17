@@ -31,12 +31,14 @@ except ImportError:  # pragma: no cover
     resource = None  # type: ignore
 
 
-# Map CodeNet language labels to a normalised runtime kind.
+# Map language labels to a normalised runtime kind.
 _LANG_KIND = {
     "C": "c",
     "C++": "cpp",
     "Python": "python",
     "Java": "java",
+    "Go": "go",
+    "JavaScript": "js",
 }
 
 
@@ -83,8 +85,12 @@ def _run(
     timeout: int,
     cpu_seconds: int,
     mem_bytes: int = 0,
+    env: Optional[dict] = None,
 ) -> subprocess.CompletedProcess:
     preexec = _preexec(cpu_seconds, mem_bytes) if os.name == "posix" else None
+    run_env = None
+    if env:
+        run_env = {**os.environ, **env}
     return subprocess.run(
         cmd,
         cwd=str(cwd),
@@ -93,6 +99,7 @@ def _run(
         text=True,
         timeout=timeout,
         preexec_fn=preexec,
+        env=run_env,
     )
 
 
@@ -143,6 +150,10 @@ def run_program(
                 return _run_compiled_c(tmpdir, kind, source, filename_ext, input_text, cfg, language)
             if kind == "java":
                 return _run_java(tmpdir, source, input_text, cfg, language)
+            if kind == "go":
+                return _run_go(tmpdir, source, input_text, cfg, language)
+            if kind == "js":
+                return _run_js(tmpdir, source, input_text, cfg, language)
         except subprocess.TimeoutExpired:
             return RunResult(language, True, True, True, None, "", "", True, "timed out")
         except Exception as exc:  # pragma: no cover - defensive
@@ -228,6 +239,49 @@ def _run_java(tmpdir, source, input_text, cfg, language) -> RunResult:
     )
 
 
+def _run_go(tmpdir, source, input_text, cfg, language) -> RunResult:
+    if shutil.which(cfg.go_bin) is None:
+        return RunResult(language, True, False, False, None, "", "", False, "go not available")
+    src = tmpdir / "main.go"
+    src.write_text(source, encoding="utf-8")
+    # Run in GOPATH mode with caches inside the temp dir so a single stdlib-only
+    # file runs fully offline.
+    env = {
+        "GO111MODULE": "off",
+        "GOCACHE": str(tmpdir / ".gocache"),
+        "GOPATH": str(tmpdir / ".gopath"),
+        "GOFLAGS": "",
+    }
+    proc = _run(
+        [cfg.go_bin, "run", str(src)], tmpdir, input_text,
+        cfg.run_timeout_seconds + cfg.compile_timeout_seconds,
+        cfg.run_timeout_seconds + cfg.compile_timeout_seconds, 0, env=env,
+    )
+    ok = proc.returncode == 0
+    return RunResult(
+        language, True, True, True, proc.returncode,
+        _truncate(proc.stdout, cfg.max_output_bytes),
+        _truncate(proc.stderr, cfg.max_output_bytes), False,
+        None if ok else "go run failed",
+    )
+
+
+def _run_js(tmpdir, source, input_text, cfg, language) -> RunResult:
+    if shutil.which(cfg.node_bin) is None:
+        return RunResult(language, True, False, False, None, "", "", False, "node not available")
+    src = tmpdir / "main.js"
+    src.write_text(source, encoding="utf-8")
+    proc = _run(
+        [cfg.node_bin, str(src)], tmpdir, input_text,
+        cfg.run_timeout_seconds, cfg.run_timeout_seconds, 0,
+    )
+    return RunResult(
+        language, True, True, True, proc.returncode,
+        _truncate(proc.stdout, cfg.max_output_bytes),
+        _truncate(proc.stderr, cfg.max_output_bytes), False, None,
+    )
+
+
 def normalise_output(text: str) -> str:
     """Strip trailing whitespace per line and trailing blank lines."""
     lines = [line.rstrip() for line in text.replace("\r\n", "\n").split("\n")]
@@ -252,21 +306,54 @@ def verify_divergence(
 
     result_a = run_program(language_a, source_a, ext_a, divergence_input, cfg)
     result_b = run_program(language_b, source_b, ext_b, divergence_input, cfg)
+    return _compare_results(result_a, result_b, method="programs", extra={"input": divergence_input})
 
+
+def verify_function_divergence(
+    cfg: VerificationConfig,
+    language_a: str,
+    program_a: Optional[str],
+    ext_a: str,
+    language_b: str,
+    program_b: Optional[str],
+    ext_b: str,
+    divergence_input: Optional[str] = None,
+) -> dict:
+    """Execute two LLM-provided driver programs (each calling its function on the
+    diverging input and printing the result) and compare their outputs.
+
+    The drivers are self-contained programs, so they are run with empty stdin.
+    Used for function-level datasets (TransCoder, HumanEval-X), where there is no
+    stdin/stdout harness for the original code.
+    """
+    if not program_a or not program_b:
+        return {
+            "status": "skipped",
+            "method": "llm_driver",
+            "reason": "LLM did not provide runnable driver programs for both languages",
+        }
+
+    result_a = run_program(language_a, program_a, ext_a, "", cfg)
+    result_b = run_program(language_b, program_b, ext_b, "", cfg)
+    return _compare_results(
+        result_a, result_b, method="llm_driver", extra={"input": divergence_input}
+    )
+
+
+def _compare_results(result_a, result_b, method: str, extra: dict) -> dict:
     both_ran = result_a.ran and result_b.ran and not result_a.timed_out and not result_b.timed_out
     outputs_differ: Optional[bool] = None
     if both_ran:
         outputs_differ = normalise_output(result_a.stdout) != normalise_output(result_b.stdout)
-
-    if both_ran:
         status = "confirmed" if outputs_differ else "refuted"
     else:
         status = "inconclusive"
 
     return {
         "status": status,                 # confirmed | refuted | inconclusive | skipped
+        "method": method,                 # "programs" | "llm_driver"
         "outputs_differ": outputs_differ,
-        "input": divergence_input,
+        **extra,
         "program_a": asdict(result_a),
         "program_b": asdict(result_b),
     }

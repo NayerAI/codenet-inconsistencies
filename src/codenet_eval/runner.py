@@ -25,7 +25,7 @@ from .prompts import build_messages
 from .providers import ProblemSample, get_provider
 from .sampling import select_problem_ids
 from .utils import append_jsonl, get_logger, read_jsonl, write_jsonl
-from .verification import verify_divergence
+from .verification import verify_divergence, verify_function_divergence
 
 log = get_logger(__name__)
 
@@ -225,6 +225,13 @@ class Runner:
         code_b = _read_source(Path(sub_b["path"]), self.cfg.llm.max_code_chars)
         # Program vs. function drives both the prompt and whether we verify.
         kind = sub_a.get("kind", "program")
+        # For function datasets we ask the LLM for runnable driver programs so we
+        # can verify by execution (there is no stdin/stdout harness otherwise).
+        request_drivers = (
+            kind == "function"
+            and self.cfg.verification.enabled
+            and self.cfg.verification.function_drivers
+        )
 
         description = sample_in = sample_out = None
         if self.cfg.llm.include_problem_description:
@@ -242,6 +249,7 @@ class Runner:
             sample_input=sample_in,
             sample_output=sample_out,
             unit_kind=kind,
+            request_drivers=request_drivers,
         )
 
         row: dict = {
@@ -283,14 +291,13 @@ class Runner:
             }
         )
 
+        if kind == "function":
+            # Keep the LLM-authored driver programs for auditability.
+            row["program_a"] = parsed.get("program_a")
+            row["program_b"] = parsed.get("program_b")
+
         if parsed.get("inconsistent") and parsed.get("divergence_input") is not None:
-            if kind != "program":
-                # Function-level datasets have no stdin/stdout execution harness.
-                row["verification"] = {
-                    "status": "skipped",
-                    "reason": "function-level dataset (no execution harness)",
-                }
-            elif self.cfg.verification.enabled:
+            if kind == "program" and self.cfg.verification.enabled:
                 row["verification"] = verify_divergence(
                     self.cfg.verification,
                     language_a=lang_a,
@@ -301,6 +308,22 @@ class Runner:
                     ext_b=sub_b["filename_ext"],
                     divergence_input=str(parsed.get("divergence_input")),
                 )
+            elif kind == "function" and self.cfg.verification.enabled and self.cfg.verification.function_drivers:
+                row["verification"] = verify_function_divergence(
+                    self.cfg.verification,
+                    language_a=lang_a,
+                    program_a=parsed.get("program_a"),
+                    ext_a=sub_a["filename_ext"],
+                    language_b=lang_b,
+                    program_b=parsed.get("program_b"),
+                    ext_b=sub_b["filename_ext"],
+                    divergence_input=parsed.get("divergence_input"),
+                )
+            elif kind == "function":
+                row["verification"] = {
+                    "status": "skipped",
+                    "reason": "function verification disabled (verification.function_drivers=false)",
+                }
         return row
 
     def _log_pair_result(self, row: dict) -> None:

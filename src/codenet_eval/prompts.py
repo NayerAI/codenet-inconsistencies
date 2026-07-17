@@ -49,7 +49,28 @@ inputs, set inconsistent to false.
 {_SCHEMA}
 """
 
-SYSTEM_PROMPT_FUNCTION = f"""\
+_DRIVER_SCHEMA = """\
+Respond with a SINGLE JSON object and NOTHING else, using exactly this schema:
+{
+  "inconsistent": boolean,          // true if diverging arguments exist
+  "confidence": number,             // 0.0 - 1.0
+  "category": string,               // short label, e.g. "integer_overflow", "none"
+  "reasoning": string,              // brief justification
+  "divergence_input": string|null,  // the arguments, stated unambiguously, or null
+  "expected_output_a": string|null, // value function A yields for those arguments
+  "expected_output_b": string|null, // value function B yields for those arguments
+  "program_a": string|null,         // see below
+  "program_b": string|null          // see below
+}
+program_a / program_b: when inconsistent is true, each must be a COMPLETE, \
+self-contained, runnable program in language A / language B that includes the \
+given function code VERBATIM, calls it on divergence_input, and prints ONLY the \
+returned value to standard output (one line, no extra text). The program must \
+compile and run as-is with no arguments and no stdin. Use null when inconsistent \
+is false.
+Do not wrap the JSON in markdown fences."""
+
+_FUNCTION_INTRO = """\
 You are a meticulous program-analysis engine. You are given two FUNCTIONS that \
 implement the SAME task (same intended behaviour and, up to language idioms, the \
 same signature) in DIFFERENT programming languages. Their intended behaviour is \
@@ -61,15 +82,14 @@ arguments.
 Decide whether there exist VALID arguments on which the two functions return \
 (or print) DIFFERENT results. If so, provide one concrete, minimal example. \
 "divergence_input" must state the exact arguments unambiguously (e.g. a call \
-like f([1,2], 3) or a JSON object of argument values); "expected_output_a"/\
-"expected_output_b" the value each function yields for those arguments.
+like f([1,2], 3) or a JSON object of argument values).
 
 Reason carefully about edge cases. Only claim an inconsistency you are \
 reasonably confident about. If the functions are equivalent for all valid \
-arguments, set inconsistent to false.
+arguments, set inconsistent to false."""
 
-{_SCHEMA}
-"""
+SYSTEM_PROMPT_FUNCTION = f"{_FUNCTION_INTRO}\n\n{_SCHEMA}\n"
+SYSTEM_PROMPT_FUNCTION_DRIVERS = f"{_FUNCTION_INTRO}\n\n{_DRIVER_SCHEMA}\n"
 
 
 def _code_block(language: str, code: str) -> str:
@@ -87,9 +107,13 @@ def build_messages(
     sample_input: Optional[str] = None,
     sample_output: Optional[str] = None,
     unit_kind: str = "program",
+    request_drivers: bool = False,
 ) -> list[dict[str, str]]:
     is_function = unit_kind == "function"
-    system = SYSTEM_PROMPT_FUNCTION if is_function else SYSTEM_PROMPT_PROGRAM
+    if is_function:
+        system = SYSTEM_PROMPT_FUNCTION_DRIVERS if request_drivers else SYSTEM_PROMPT_FUNCTION
+    else:
+        system = SYSTEM_PROMPT_PROGRAM
     noun = "functions" if is_function else "programs"
 
     parts: list[str] = [f"Problem id: {problem_id}"]

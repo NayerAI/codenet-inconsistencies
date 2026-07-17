@@ -139,7 +139,7 @@ def test_parallel_evaluation_produces_all_results(mini_config, tmp_path):
     assert summary["inconsistent"] == 3
 
 
-def test_function_dataset_skips_verification(tmp_path):
+def _humaneval_run(tmp_path, stub):
     import gzip
     import json
 
@@ -163,21 +163,45 @@ def test_function_dataset_skips_verification(tmp_path):
     runner.provider.ensure()
     run_dir = tmp_path / "run"
     runner.sample(run_dir)
+    runner.evaluate(run_dir, stub)
+    return run_dir, list(read_jsonl(run_dir / "results.jsonl"))
 
+
+def test_function_dataset_without_drivers_skips_verification(tmp_path):
     class Stub:
         def complete(self, messages):
-            # Confirm the function-style system prompt was selected.
-            assert "two FUNCTIONS" in messages[0]["content"]
+            assert "two FUNCTIONS" in messages[0]["content"]        # function prompt
+            assert "program_a" in messages[0]["content"]            # drivers requested
             return LLMResponse(raw_content="{}", parsed={"inconsistent": True, "divergence_input": "f()"}, model="s", usage={})
 
-    runner.evaluate(run_dir, Stub())
-    results = list(read_jsonl(run_dir / "results.jsonl"))
+    run_dir, results = _humaneval_run(tmp_path, Stub())
     assert len(results) == 1
     assert results[0]["kind"] == "function"
-    assert results[0]["dataset"] == "humaneval_x"
-    assert results[0]["verification"]["status"] == "skipped"
-
+    assert results[0]["verification"]["status"] == "skipped"  # no drivers returned
     assert summarise(run_dir)["verification"]["skipped"] == 1
+
+
+@pytest.mark.skipif(not TOOLCHAINS, reason="gcc + python3 required")
+def test_function_dataset_driver_verification_confirmed(tmp_path):
+    class Stub:
+        def complete(self, messages):
+            return LLMResponse(
+                raw_content="{}",
+                parsed={
+                    "inconsistent": True,
+                    "divergence_input": "f(7)",
+                    "program_a": "print(7/2)\n",  # Python -> 3.5
+                    "program_b": '#include <iostream>\nint main(){std::cout<<7/2<<"\\n";}\n',  # C++ -> 3
+                },
+                model="s",
+                usage={},
+            )
+
+    run_dir, results = _humaneval_run(tmp_path, Stub())
+    v = results[0]["verification"]
+    assert v["method"] == "llm_driver"
+    assert v["status"] == "confirmed"
+    assert v["outputs_differ"] is True
 
 
 def test_workers_config_and_override(mini_config, tmp_path):

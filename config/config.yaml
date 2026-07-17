@@ -71,9 +71,13 @@ llm:
   extra_headers: {}                 # e.g. {HTTP-Referer: ..., X-Title: ...}
 
 verification:
-  # Execute both programs on the LLM's proposed input and check they really
-  # diverge. Needs gcc / python3 / javac+java (all in the Apptainer image).
+  # Execute the LLM's proposed divergence and check it really diverges.
+  #   codenet (programs): run the ORIGINAL programs on the diverging stdin.
+  #   transcoder / humaneval_x (functions): the LLM also returns a runnable
+  #     driver per language (function_drivers); both are executed and compared.
+  # Toolchains (gcc/g++/python3/javac+java/go/node) are all in the Apptainer image.
   enabled: true
+  function_drivers: true            # ask for + run per-language drivers (functions)
   run_timeout_seconds: 10
   compile_timeout_seconds: 30
   max_output_bytes: 100000
@@ -83,6 +87,8 @@ verification:
   gpp_bin: g++
   javac_bin: javac
   java_bin: java
+  go_bin: go
+  node_bin: node
 
 execution:
   # Parallel workers for the evaluation stage (one LLM request + its optional

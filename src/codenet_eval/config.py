@@ -104,10 +104,18 @@ class LLMConfig:
 
 @dataclass
 class VerificationConfig:
-    # When enabled, LLM-proposed divergence inputs are executed against both
-    # programs and the outputs are compared. Requires the relevant toolchains
-    # (gcc / python3 / javac+java) -- all present in the Apptainer image.
+    # When enabled, LLM-proposed divergences are executed and outputs compared.
+    #   * program datasets (CodeNet): run the ORIGINAL programs on the diverging
+    #     stdin.
+    #   * function datasets (TransCoder, HumanEval-X): the LLM also returns a
+    #     complete runnable driver per language that calls the function on the
+    #     diverging input; both drivers are executed and their outputs compared
+    #     (see function_drivers).
+    # Requires the relevant toolchains -- all present in the Apptainer image.
     enabled: bool = True
+    # For function datasets, ask the LLM for per-language driver programs and
+    # execute them to verify. Costs extra output tokens; set false to skip.
+    function_drivers: bool = True
     run_timeout_seconds: int = 10
     compile_timeout_seconds: int = 30
     max_output_bytes: int = 100_000
@@ -118,6 +126,8 @@ class VerificationConfig:
     gpp_bin: str = "g++"
     javac_bin: str = "javac"
     java_bin: str = "java"
+    go_bin: str = "go"
+    node_bin: str = "node"
 
 
 @dataclass

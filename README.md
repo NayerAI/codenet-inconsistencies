@@ -8,20 +8,25 @@ Supports three parallel/transpilation datasets through one pipeline:
 
 | `dataset.type` | Source | Unit | Languages | Verification |
 |----------------|--------|------|-----------|--------------|
-| `codenet` | [IBM Project CodeNet](https://github.com/IBM/Project_CodeNet) | stdin/stdout **program** | C, C++, Python, Java, Go, … | ✅ executed |
-| `transcoder` | [TransCoder-test](https://github.com/facebookresearch/CodeGen) (GfG parallel functions) | **function** | C++, Java, Python | ⏭️ skipped |
-| `humaneval_x` | [HumanEval-X](https://github.com/THUDM/CodeGeeX) | **function** | Python, C++, Java, JavaScript, Go | ⏭️ skipped |
+| `codenet` | [IBM Project CodeNet](https://github.com/IBM/Project_CodeNet) | stdin/stdout **program** | C, C++, Python, Java, Go, … | ✅ run original programs |
+| `transcoder` | [TransCoder-test](https://github.com/facebookresearch/CodeGen) (GfG parallel functions) | **function** | C++, Java, Python | ✅ run LLM drivers |
+| `humaneval_x` | [HumanEval-X](https://github.com/THUDM/CodeGeeX) | **function** | Python, C++, Java, JavaScript, Go | ✅ run LLM drivers |
 
 For a given problem each language has an implementation meant to behave
 identically, yet subtle differences — integer overflow, integer vs.
 floating-point division, rounding, output precision, parsing, off-by-one edge
 cases — can make them disagree. The framework samples problems, sends each
 language pair to an LLM (via [OpenRouter](https://openrouter.ai/)), asks it to
-find a diverging input, and — for stdin/stdout **programs** (CodeNet) — can then
-**actually execute both programs** to confirm the claim. For **function**-level
-datasets the LLM detection runs the same way, but execution-verification is
-skipped (there is no cross-language calling harness), so those results are
-marked `verification: skipped`.
+find a diverging input, and then **executes both sides to confirm the claim**:
+
+* **programs** (CodeNet): the two original programs are run on the diverging
+  stdin and their outputs compared.
+* **functions** (TransCoder, HumanEval-X): there is no stdin/stdout harness, so
+  the LLM additionally returns a complete, self-contained **driver program per
+  language** that embeds the given function and calls it on the diverging input;
+  both drivers are executed (C++/Java/Python/Go/JavaScript) and their outputs
+  compared. The verification record is labelled `method: llm_driver`, and the
+  drivers are stored in `results.jsonl` for audit.
 
 ---
 
@@ -141,8 +146,11 @@ Notes:
 * **HumanEval-X** downloads five small `humaneval_<lang>.jsonl.gz` files and
   materialises `prompt + canonical_solution` per task under
   `data/humaneval-x/sources/`.
-* Both are **function**-level, so `run` performs LLM detection but marks
-  `verification: skipped`. Only CodeNet programs are executed.
+* Both are **function**-level: `run` performs LLM detection and, when it claims
+  an inconsistency, verifies by executing the LLM-provided driver programs
+  (`verification.function_drivers: true`, needs go/node in addition to
+  gcc/g++/python3/javac). Set it to `false` to skip driver verification and save
+  output tokens.
 
 ### Offline / air-gapped / behind a proxy
 
@@ -323,7 +331,8 @@ A `results.jsonl` row looks like:
 
 Verification `status` is `confirmed` (outputs really differ), `refuted` (they
 match — LLM false positive), `inconclusive` (a program failed to compile/run or
-timed out), or `skipped`.
+timed out), or `skipped`. `method` is `programs` (CodeNet, original programs) or
+`llm_driver` (function datasets, executed LLM driver programs).
 
 ---
 
