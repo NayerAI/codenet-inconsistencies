@@ -1,17 +1,27 @@
-# CodeNet Cross-Language Inconsistency Evaluation
+# Cross-Language Inconsistency Evaluation
 
 An evaluation framework (Python + Apptainer) that uses an LLM to find **inputs
-for [IBM Project CodeNet](https://github.com/IBM/Project_CodeNet) samples that
-make implementations in different programming languages produce different
-outputs**.
+on which implementations of the same task in different programming languages
+produce different outputs**.
 
-For a given problem, CodeNet contains accepted submissions in many languages.
-They are all supposed to solve the same task, yet subtle differences — integer
-overflow, integer vs. floating-point division, rounding, default output
-precision, input parsing, off-by-one edge cases — can make them disagree on
-some inputs. This framework samples problems, sends each language pair to an LLM
-(via [OpenRouter](https://openrouter.ai/)), asks it to find such a diverging
-input, and can then **actually execute both programs** to confirm the claim.
+Supports three parallel/transpilation datasets through one pipeline:
+
+| `dataset.type` | Source | Unit | Languages | Verification |
+|----------------|--------|------|-----------|--------------|
+| `codenet` | [IBM Project CodeNet](https://github.com/IBM/Project_CodeNet) | stdin/stdout **program** | C, C++, Python, Java, Go, … | ✅ executed |
+| `transcoder` | [TransCoder-test](https://github.com/facebookresearch/CodeGen) (GfG parallel functions) | **function** | C++, Java, Python | ⏭️ skipped |
+| `humaneval_x` | [HumanEval-X](https://github.com/THUDM/CodeGeeX) | **function** | Python, C++, Java, JavaScript, Go | ⏭️ skipped |
+
+For a given problem each language has an implementation meant to behave
+identically, yet subtle differences — integer overflow, integer vs.
+floating-point division, rounding, output precision, parsing, off-by-one edge
+cases — can make them disagree. The framework samples problems, sends each
+language pair to an LLM (via [OpenRouter](https://openrouter.ai/)), asks it to
+find a diverging input, and — for stdin/stdout **programs** (CodeNet) — can then
+**actually execute both programs** to confirm the claim. For **function**-level
+datasets the LLM detection runs the same way, but execution-verification is
+skipped (there is no cross-language calling harness), so those results are
+marked `verification: skipped`.
 
 ---
 
@@ -20,20 +30,20 @@ input, and can then **actually execute both programs** to confirm the claim.
 ```
 download  ──►  sample  ──►  run (LLM + verify)  ──►  report
    │             │                  │                    │
-CodeNet     manifest.jsonl     results.jsonl        summary.json
+ dataset    manifest.jsonl     results.jsonl        summary.json
 ```
 
-1. **download** – fetch and extract CodeNet into `data/`.
-2. **sample** – find every problem that has an (accepted) submission in *all*
-   configured languages, then randomly pick **X %** of them (default 1 %).
+1. **download** – fetch/prepare the configured dataset into `data/`.
+2. **sample** – find every problem solved in *all* configured languages, then
+   randomly pick **X %** of them (default 1 %).
 3. **run** – for each sampled problem, build the configured **language pairs**
    and ask the LLM to detect an inconsistency and provide a diverging input.
-   If verification is enabled, both programs are compiled/run on that input and
-   the outputs are compared.
+   For CodeNet programs, both are then compiled/run on that input and the
+   outputs compared.
 4. **report** – aggregate `results.jsonl` into summary statistics.
 
-All persistent data — the CodeNet dataset **and** every result — lives under a
-single `data/` directory (configurable via `data_dir`).
+All persistent data — the dataset **and** every result — lives under a single
+`data/` directory (configurable via `data_dir`).
 
 ---
 
@@ -99,6 +109,40 @@ codenet-eval -c config/config.yaml report --run-name run1
 
 `run` is **resumable**: re-running skips language pairs already present in
 `results.jsonl`. Use `--limit N` to bound the number of API calls per invocation.
+
+### Choosing a dataset
+
+Set `dataset.type` and pick languages the dataset actually provides (see the
+table above). `inspect` reports availability and eligibility.
+
+```bash
+# TransCoder-test (C++ / Java / Python parallel functions)
+codenet-eval -c config/config.yaml --data-dir ./data \
+    all   # with dataset.type: transcoder and languages: [C++, Java, Python]
+
+# HumanEval-X (Python / C++ / Java / JavaScript / Go)
+codenet-eval -c config/config.yaml inspect   # dataset.type: humaneval_x
+```
+
+A minimal HumanEval-X config:
+
+```yaml
+data_dir: ./data
+dataset: { type: humaneval_x }
+languages: [Python, C++, Java]
+pairing: { strategy: reference, reference_language: Python }
+```
+
+Notes:
+
+* **TransCoder** downloads a `.tar.gz` of `facebookresearch/CodeGen` and extracts
+  only `data/transcoder_evaluation_gfg/`. Point `dataset.transcoder_url` at a
+  local archive / `file://` path if the host can't reach GitHub codeload.
+* **HumanEval-X** downloads five small `humaneval_<lang>.jsonl.gz` files and
+  materialises `prompt + canonical_solution` per task under
+  `data/humaneval-x/sources/`.
+* Both are **function**-level, so `run` performs LLM detection but marks
+  `verification: skipped`. Only CodeNet programs are executed.
 
 ### Offline / air-gapped / behind a proxy
 
@@ -175,6 +219,9 @@ fields:
 
 ```yaml
 data_dir: ./data                 # (5) root for dataset + all results
+
+dataset:
+  type: codenet                  # codenet | transcoder | humaneval_x
 
 languages:                       # (2) which languages to compare (>= 2)
   - C
@@ -328,11 +375,12 @@ output comparison in the verification step.
 ```
 src/codenet_eval/
   config.py         # YAML config model + validation
-  download.py       # resumable download + safe extraction
-  dataset.py        # read metadata / submissions / descriptions / sample I/O
+  providers.py      # dataset adapters: codenet / transcoder / humaneval_x
+  download.py       # resumable download + safe extraction (generic + CodeNet)
+  dataset.py        # read CodeNet metadata / submissions / descriptions / I/O
   sampling.py       # reproducible X% sampling
   pairing.py        # language-pair strategies
-  prompts.py        # LLM prompt construction
+  prompts.py        # LLM prompt construction (program vs. function)
   llm.py            # OpenRouter (OpenAI-compatible) client + JSON parsing
   verification.py   # compile & run programs, compare outputs (sandboxed)
   runner.py         # orchestration (sample -> query -> verify -> store)

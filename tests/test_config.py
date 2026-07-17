@@ -43,11 +43,24 @@ def test_derived_paths():
         {"sampling": {"percent": 0}},               # out of range
         {"sampling": {"percent": 150}},             # out of range
         {"pairing": {"strategy": "nonsense"}},      # unknown strategy
-        {"pairing": {"reference_language": "Go"}},  # ref not in languages
         {"execution": {"workers": 0}},              # need >= 1
+        {"dataset": {"type": "nope"}},              # unknown dataset type
     ],
 )
 def test_validation_rejects_bad_config(bad):
     cfg = Config.from_dict(bad)
     with pytest.raises(ValueError):
         cfg.validate()
+
+
+def test_reference_language_outside_languages_is_not_fatal():
+    # Now a warning + fallback (pairing uses the first language), not an error.
+    cfg = Config.from_dict({"languages": ["C++", "Java"], "pairing": {"reference_language": "C"}})
+    cfg.validate()  # must not raise
+
+
+def test_dataset_type_default_and_override():
+    assert Config.from_dict({}).dataset.type == "codenet"
+    cfg = Config.from_dict({"dataset": {"type": "humaneval_x"}})
+    cfg.validate()
+    assert cfg.dataset.type == "humaneval_x"

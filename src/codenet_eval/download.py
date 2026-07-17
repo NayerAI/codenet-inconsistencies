@@ -135,6 +135,61 @@ def download_archive(cfg: Config, force: bool = False, offline: bool = False) ->
     return dest
 
 
+def download_url(
+    url: str,
+    dest: Path,
+    offline: bool = False,
+    force: bool = False,
+) -> Path:
+    """Generic download to ``dest`` with local-file / offline / resume support.
+
+    Returns the path to use (the local source itself for local/``file://`` URLs,
+    otherwise ``dest``). Shared by the non-CodeNet dataset providers.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    local = local_archive_path(url)
+    if local is not None:
+        if not local.is_file():
+            raise FileNotFoundError(f"Local file not found: {local} (from {url})")
+        log.info("Using local file (no download): %s", local)
+        return local
+
+    if offline:
+        if not dest.is_file():
+            raise FileNotFoundError(
+                f"Offline mode, but {dest} is missing. Download '{url}' on a "
+                f"networked machine and place it there."
+            )
+        log.info("Offline mode: using existing %s (skipping network)", dest)
+        return dest
+
+    if force and dest.exists():
+        dest.unlink()
+    existing = dest.stat().st_size if dest.exists() else 0
+
+    headers: dict[str, str] = {}
+    mode = "wb"
+    if existing:
+        headers["Range"] = f"bytes={existing}-"
+        mode = "ab"
+
+    with requests.get(url, stream=True, headers=headers, timeout=60) as resp:
+        if resp.status_code == 416:
+            log.info("Already fully downloaded: %s", dest)
+            return dest
+        if existing and resp.status_code == 200:
+            existing = 0
+            mode = "wb"
+        resp.raise_for_status()
+        with open(dest, mode) as handle:
+            for chunk in resp.iter_content(chunk_size=_CHUNK):
+                if chunk:
+                    handle.write(chunk)
+    log.info("Downloaded %s (%s)", dest, human_bytes(dest.stat().st_size))
+    return dest
+
+
 def _is_within(directory: Path, target: Path) -> bool:
     try:
         target.resolve().relative_to(directory.resolve())

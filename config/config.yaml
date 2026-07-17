@@ -9,8 +9,10 @@
 # Root for ALL persistent data: the downloaded CodeNet dataset AND all results.
 data_dir: ./data
 
-# Languages to compare. Must match CodeNet's language labels exactly.
-# (e.g. "C", "C++", "Python", "Java", "Go", "Ruby", ...). At least two.
+# Languages to compare (at least two). Use each dataset's canonical labels:
+#   codenet     : C, C++, Python, Java, Go, Ruby, ...   (stdin/stdout programs)
+#   transcoder  : C++, Java, Python                      (parallel functions)
+#   humaneval_x : Python, C++, Java, JavaScript, Go      (parallel functions)
 languages:
   - C
   - Python
@@ -19,6 +21,10 @@ languages:
 log_level: INFO
 
 dataset:
+  # Which dataset to evaluate: codenet | transcoder | humaneval_x.
+  type: codenet
+
+  # --- CodeNet (type: codenet) ---------------------------------------------
   # Full Project CodeNet archive (7.8 GB compressed) on IBM Cloud Object Storage.
   # (The old dax-cdn.cdn.appdomain.cloud CDN was decommissioned by IBM.)
   # May also be a local path or file:// URL to extract without downloading.
@@ -26,6 +32,15 @@ dataset:
   archive_name: Project_CodeNet.tar.gz
   root_name: Project_CodeNet
   checksum_sha256: null   # optional integrity check after download
+
+  # --- TransCoder-test (type: transcoder) ----------------------------------
+  # A .tar.gz/.zip of facebookresearch/CodeGen (or a local path / file:// URL).
+  transcoder_url: https://codeload.github.com/facebookresearch/CodeGen/tar.gz/refs/heads/main
+  transcoder_subdir: data/transcoder_evaluation_gfg
+
+  # --- HumanEval-X (type: humaneval_x) -------------------------------------
+  # Base URL holding per-language humaneval_<lang>.jsonl.gz (THUDM/CodeGeeX).
+  humaneval_x_base_url: https://raw.githubusercontent.com/THUDM/CodeGeeX/main/codegeex/benchmark/humaneval-x
 
 sampling:
   percent: 1.0            # X% of eligible problems (default 1%)

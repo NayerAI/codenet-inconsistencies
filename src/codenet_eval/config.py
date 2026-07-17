@@ -26,8 +26,16 @@ DEFAULT_DATASET_URL = (
 )
 
 
+DATASET_TYPES = ("codenet", "transcoder", "humaneval_x")
+
+
 @dataclass
 class DatasetConfig:
+    # Which dataset to evaluate: "codenet" (stdin/stdout programs),
+    # "transcoder" or "humaneval_x" (parallel functions across languages).
+    type: str = "codenet"
+
+    # --- CodeNet ------------------------------------------------------------
     url: str = DEFAULT_DATASET_URL
     # Name of the downloaded archive inside ``data_dir``.
     archive_name: str = "Project_CodeNet.tar.gz"
@@ -35,6 +43,21 @@ class DatasetConfig:
     root_name: str = "Project_CodeNet"
     # Optional SHA-256 to verify the archive after download.
     checksum_sha256: Optional[str] = None
+
+    # --- TransCoder-test (parallel GfG functions in facebookresearch/CodeGen) -
+    # A .tar.gz/.zip of the CodeGen repo, or a local path / file:// URL to one.
+    transcoder_url: str = (
+        "https://codeload.github.com/facebookresearch/CodeGen/tar.gz/refs/heads/main"
+    )
+    # Sub-path inside the archive holding the parallel functions.
+    transcoder_subdir: str = "data/transcoder_evaluation_gfg"
+
+    # --- HumanEval-X (THUDM/CodeGeeX) ---------------------------------------
+    # Base URL under which per-language humaneval_<lang>.jsonl.gz files live.
+    humaneval_x_base_url: str = (
+        "https://raw.githubusercontent.com/THUDM/CodeGeeX/main/"
+        "codegeex/benchmark/humaneval-x"
+    )
 
 
 @dataclass
@@ -143,6 +166,16 @@ class Config:
         return self.data_path / self.dataset.archive_name
 
     @property
+    def transcoder_root(self) -> Path:
+        """Directory holding the extracted TransCoder parallel functions."""
+        return self.data_path / "transcoder"
+
+    @property
+    def humaneval_x_root(self) -> Path:
+        """Directory holding the materialised HumanEval-X solutions."""
+        return self.data_path / "humaneval-x"
+
+    @property
     def results_root(self) -> Path:
         results = Path(self.output.results_dir).expanduser()
         if results.is_absolute():
@@ -193,6 +226,10 @@ class Config:
 
     # --- validation ----------------------------------------------------------
     def validate(self) -> None:
+        if self.dataset.type not in DATASET_TYPES:
+            raise ValueError(
+                f"dataset.type must be one of {DATASET_TYPES}, got {self.dataset.type!r}"
+            )
         if len(self.languages) < 2:
             raise ValueError("At least two languages are required for pairwise comparison")
         if len(set(self.languages)) != len(self.languages):
@@ -203,14 +240,9 @@ class Config:
             raise ValueError("execution.workers must be >= 1")
         if self.pairing.strategy not in ("reference", "all"):
             raise ValueError("pairing.strategy must be 'reference' or 'all'")
-        if self.pairing.strategy == "reference":
-            ref = self.pairing.reference_language
-            if ref not in self.languages:
-                # Not fatal: pairing falls back to the first language, but warn early.
-                raise ValueError(
-                    f"pairing.reference_language '{ref}' is not in languages "
-                    f"{self.languages}; add it or set it to one of them"
-                )
+        # A reference language outside 'languages' is not fatal: pairing falls
+        # back to the first language (and warns). This keeps multi-dataset use
+        # smooth, where the natural reference differs (e.g. C++ vs C).
 
 
 def _defaults_dict() -> dict[str, Any]:

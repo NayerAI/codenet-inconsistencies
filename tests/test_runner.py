@@ -139,6 +139,47 @@ def test_parallel_evaluation_produces_all_results(mini_config, tmp_path):
     assert summary["inconsistent"] == 3
 
 
+def test_function_dataset_skips_verification(tmp_path):
+    import gzip
+    import json
+
+    from codenet_eval.config import Config
+
+    base = tmp_path / "hex"
+    for token, prefix in [("python", "Python"), ("cpp", "CPP")]:
+        p = base / token / "data" / f"humaneval_{token}.jsonl.gz"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(p, "wt", encoding="utf-8") as fh:
+            fh.write(json.dumps({"task_id": f"{prefix}/0", "prompt": "def f():\n", "canonical_solution": "    return 1\n"}) + "\n")
+
+    cfg = Config.from_dict({
+        "data_dir": str(tmp_path / "data"),
+        "dataset": {"type": "humaneval_x", "humaneval_x_base_url": f"file://{base}"},
+        "languages": ["Python", "C++"],
+        "pairing": {"strategy": "all"},
+        "verification": {"enabled": True},
+    })
+    runner = Runner(cfg)
+    runner.provider.ensure()
+    run_dir = tmp_path / "run"
+    runner.sample(run_dir)
+
+    class Stub:
+        def complete(self, messages):
+            # Confirm the function-style system prompt was selected.
+            assert "two FUNCTIONS" in messages[0]["content"]
+            return LLMResponse(raw_content="{}", parsed={"inconsistent": True, "divergence_input": "f()"}, model="s", usage={})
+
+    runner.evaluate(run_dir, Stub())
+    results = list(read_jsonl(run_dir / "results.jsonl"))
+    assert len(results) == 1
+    assert results[0]["kind"] == "function"
+    assert results[0]["dataset"] == "humaneval_x"
+    assert results[0]["verification"]["status"] == "skipped"
+
+    assert summarise(run_dir)["verification"]["skipped"] == 1
+
+
 def test_workers_config_and_override(mini_config, tmp_path):
     # execution.workers default plus an explicit --workers-style override.
     assert mini_config.execution.workers == 4

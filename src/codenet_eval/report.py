@@ -49,10 +49,12 @@ def summarise(run_dir: Path) -> dict:
         "categories": dict(categories.most_common()),
         "pairs": dict(pair_counter.most_common()),
         "verification": {
-            "attempted": len(verifications),
+            # 'attempted' counts executed checks (skipped function-level ones excluded).
+            "attempted": confirmed + refuted + verif_status.get("inconclusive", 0),
             "confirmed": confirmed,
             "refuted": refuted,
             "inconclusive": verif_status.get("inconclusive", 0),
+            "skipped": verif_status.get("skipped", 0),
             "precision_on_verified": (confirmed / verified_total) if verified_total else None,
         },
         "total_tokens": tokens,
@@ -69,7 +71,7 @@ def write_summary(run_dir: Path, summary: dict) -> Path:
 def format_summary(summary: dict) -> str:
     v = summary["verification"]
     lines = [
-        "==================== CodeNet inconsistency run ====================",
+        "================ cross-language inconsistency run =================",
         f"run dir            : {summary['run_dir']}",
         f"total LLM requests : {summary['total_requests']}",
         f"  llm errors       : {summary['llm_errors']}",
@@ -83,6 +85,7 @@ def format_summary(summary: dict) -> str:
         f"  confirmed (differ): {v['confirmed']}",
         f"  refuted (same)   : {v['refuted']}",
         f"  inconclusive     : {v['inconclusive']}",
+        f"  skipped (func)   : {v.get('skipped', 0)}",
         f"  precision        : {_pct(v['precision_on_verified'])}",
         f"total tokens       : {summary['total_tokens']}",
     ]

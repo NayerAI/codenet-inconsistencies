@@ -19,10 +19,10 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from .config import Config
-from .dataset import CodeNetDataset, Submission
 from .llm import LLMError, OpenRouterClient
 from .pairing import language_pairs
 from .prompts import build_messages
+from .providers import ProblemSample, get_provider
 from .sampling import select_problem_ids
 from .utils import append_jsonl, get_logger, read_jsonl, write_jsonl
 from .verification import verify_divergence
@@ -45,30 +45,31 @@ def default_run_name() -> str:
 class Runner:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.dataset = CodeNetDataset(cfg)
+        self.provider = get_provider(cfg)
 
     # --- stage 1: sampling ---------------------------------------------------
     def sample(self, run_dir: Path) -> list[dict]:
-        if not self.dataset.exists():
+        if not self.provider.is_ready():
             raise FileNotFoundError(
-                f"Dataset not found under {self.dataset.root}. Run 'download' first."
+                f"Dataset '{self.cfg.dataset.type}' not prepared. Run 'download' first."
             )
         languages = self.cfg.languages
-        log.info("Scanning problems eligible for languages: %s", ", ".join(languages))
+        log.info(
+            "Scanning %s problems eligible for languages: %s",
+            self.cfg.dataset.type,
+            ", ".join(languages),
+        )
 
-        eligible: dict[str, dict[str, Submission]] = {}
-        for pid, reps in self.dataset.eligible_problems(
-            languages, require_accepted=self.cfg.sampling.require_accepted
-        ):
-            eligible[pid] = reps
+        eligible: dict[str, ProblemSample] = {
+            s.problem_id: s for s in self.provider.iter_eligible(languages)
+        }
         log.info("Found %d eligible problems", len(eligible))
         if not eligible:
+            avail = ", ".join(self.provider.available_languages())
             raise RuntimeError(
-                "No problem has submissions in all selected languages. "
-                "Run 'codenet-eval inspect' to see which languages are present "
-                "and whether submission source files resolve on disk. "
-                "(Also make sure you are running the latest build -- "
-                "'codenet-eval inspect' must exist; if it does not, rebuild.)"
+                "No problem is solved in all selected languages "
+                f"({', '.join(languages)}). This dataset provides: {avail}. "
+                "Run 'inspect' to diagnose; check the 'languages' config."
             )
 
         chosen_ids = select_problem_ids(
@@ -87,20 +88,24 @@ class Runner:
 
         rows: list[dict] = []
         for pid in chosen_ids:
-            reps = eligible[pid]
+            sample = eligible[pid]
+            self.provider.enrich(sample)  # description / sample I/O for chosen only
             rows.append(
                 {
                     "problem_id": pid,
+                    "dataset": self.cfg.dataset.type,
+                    "description": sample.description,
+                    "sample_input": sample.sample_input,
+                    "sample_output": sample.sample_output,
                     "submissions": {
                         lang: {
-                            "submission_id": sub.submission_id,
-                            "language": sub.language,
-                            "filename_ext": sub.filename_ext,
-                            "status": sub.status,
-                            "code_size": sub.code_size,
-                            "path": str(sub.path),
+                            "submission_id": unit.unit_id,
+                            "language": unit.language,
+                            "filename_ext": unit.ext,
+                            "kind": unit.kind,
+                            "path": str(unit.path),
                         }
-                        for lang, sub in reps.items()
+                        for lang, unit in sample.units.items()
                     },
                     "pairs": [list(p) for p in pairs],
                 }
@@ -125,11 +130,10 @@ class Runner:
         return list(read_jsonl(manifest_path))
 
     # --- stage 2: evaluation -------------------------------------------------
-    def _iter_pairs(self, manifest: list[dict]) -> Iterator[tuple[str, dict, str, str]]:
+    def _iter_pairs(self, manifest: list[dict]) -> Iterator[tuple[dict, str, str]]:
         for row in manifest:
-            pid = row["problem_id"]
             for pair in row["pairs"]:
-                yield pid, row["submissions"], pair[0], pair[1]
+                yield row, pair[0], pair[1]
 
     def _existing_keys(self, results_path: Path) -> set[str]:
         if not results_path.is_file():
@@ -154,11 +158,11 @@ class Runner:
             log.info("Resuming: %d pairs already completed", len(done))
 
         # Assemble the pending work (pairs not yet done), honouring the limit.
-        pending: list[tuple[str, dict, str, str]] = []
-        for pid, submissions, lang_a, lang_b in self._iter_pairs(manifest):
-            if _pair_key(pid, lang_a, lang_b) in done:
+        pending: list[tuple[dict, str, str]] = []
+        for mrow, lang_a, lang_b in self._iter_pairs(manifest):
+            if _pair_key(mrow["problem_id"], lang_a, lang_b) in done:
                 continue
-            pending.append((pid, submissions, lang_a, lang_b))
+            pending.append((mrow, lang_a, lang_b))
         if limit is not None:
             pending = pending[:limit]
 
@@ -170,9 +174,9 @@ class Runner:
         log.info("Evaluating %d pairs with %d worker(s)", len(pending), workers)
         write_lock = threading.Lock()
 
-        def handle(task: tuple[str, dict, str, str]) -> None:
-            pid, submissions, lang_a, lang_b = task
-            row = self._safe_evaluate_pair(pid, submissions, lang_a, lang_b, client)
+        def handle(task: tuple[dict, str, str]) -> None:
+            mrow, lang_a, lang_b = task
+            row = self._safe_evaluate_pair(mrow, lang_a, lang_b, client)
             with write_lock:
                 append_jsonl(results_path, row)
                 self._log_pair_result(row)
@@ -188,18 +192,19 @@ class Runner:
         log.info("Evaluation finished: %d new results -> %s", len(pending), results_path)
         return results_path
 
-    def _safe_evaluate_pair(self, pid, submissions, lang_a, lang_b, client) -> dict:
+    def _safe_evaluate_pair(self, mrow: dict, lang_a: str, lang_b: str, client) -> dict:
         """Never raise: a worker crash must not abort the whole pool/run."""
         try:
-            return self._evaluate_pair(pid, submissions, lang_a, lang_b, client)
+            return self._evaluate_pair(mrow, lang_a, lang_b, client)
         except Exception as exc:  # pragma: no cover - defensive
-            log.exception("Unexpected error evaluating %s %s/%s", pid, lang_a, lang_b)
+            log.exception("Unexpected error evaluating %s %s/%s", mrow.get("problem_id"), lang_a, lang_b)
+            subs = mrow.get("submissions", {})
             return {
-                "problem_id": pid,
+                "problem_id": mrow.get("problem_id"),
                 "language_a": lang_a,
                 "language_b": lang_b,
-                "submission_a": submissions.get(lang_a, {}).get("submission_id"),
-                "submission_b": submissions.get(lang_b, {}).get("submission_id"),
+                "submission_a": subs.get(lang_a, {}).get("submission_id"),
+                "submission_b": subs.get(lang_b, {}).get("submission_id"),
                 "model": self.cfg.llm.model,
                 "timestamp": _now(),
                 "error": f"{type(exc).__name__}: {exc}",
@@ -207,24 +212,25 @@ class Runner:
 
     def _evaluate_pair(
         self,
-        pid: str,
-        submissions: dict,
+        mrow: dict,
         lang_a: str,
         lang_b: str,
         client: Optional[OpenRouterClient],
     ) -> dict:
+        pid = mrow["problem_id"]
+        submissions = mrow["submissions"]
         sub_a = submissions[lang_a]
         sub_b = submissions[lang_b]
         code_a = _read_source(Path(sub_a["path"]), self.cfg.llm.max_code_chars)
         code_b = _read_source(Path(sub_b["path"]), self.cfg.llm.max_code_chars)
+        # Program vs. function drives both the prompt and whether we verify.
+        kind = sub_a.get("kind", "program")
 
-        description = None
-        sample_in = sample_out = None
+        description = sample_in = sample_out = None
         if self.cfg.llm.include_problem_description:
-            description = self.dataset.problem_description(pid)
-            io = self.dataset.sample_io(pid)
-            if io is not None:
-                sample_in, sample_out = io
+            description = mrow.get("description")
+            sample_in = mrow.get("sample_input")
+            sample_out = mrow.get("sample_output")
 
         messages = build_messages(
             problem_id=pid,
@@ -235,14 +241,17 @@ class Runner:
             description=description,
             sample_input=sample_in,
             sample_output=sample_out,
+            unit_kind=kind,
         )
 
         row: dict = {
             "problem_id": pid,
+            "dataset": mrow.get("dataset", self.cfg.dataset.type),
             "language_a": lang_a,
             "submission_a": sub_a["submission_id"],
             "language_b": lang_b,
             "submission_b": sub_b["submission_id"],
+            "kind": kind,
             "pairing_strategy": self.cfg.pairing.strategy,
             "model": self.cfg.llm.model,
             "timestamp": _now(),
@@ -274,19 +283,24 @@ class Runner:
             }
         )
 
-        if self.cfg.verification.enabled and parsed.get("inconsistent") and parsed.get(
-            "divergence_input"
-        ) is not None:
-            row["verification"] = verify_divergence(
-                self.cfg.verification,
-                language_a=lang_a,
-                source_a=code_a,
-                ext_a=sub_a["filename_ext"],
-                language_b=lang_b,
-                source_b=code_b,
-                ext_b=sub_b["filename_ext"],
-                divergence_input=str(parsed.get("divergence_input")),
-            )
+        if parsed.get("inconsistent") and parsed.get("divergence_input") is not None:
+            if kind != "program":
+                # Function-level datasets have no stdin/stdout execution harness.
+                row["verification"] = {
+                    "status": "skipped",
+                    "reason": "function-level dataset (no execution harness)",
+                }
+            elif self.cfg.verification.enabled:
+                row["verification"] = verify_divergence(
+                    self.cfg.verification,
+                    language_a=lang_a,
+                    source_a=code_a,
+                    ext_a=sub_a["filename_ext"],
+                    language_b=lang_b,
+                    source_b=code_b,
+                    ext_b=sub_b["filename_ext"],
+                    divergence_input=str(parsed.get("divergence_input")),
+                )
         return row
 
     def _log_pair_result(self, row: dict) -> None:

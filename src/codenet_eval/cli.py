@@ -23,8 +23,8 @@ from typing import Optional
 import requests
 
 from .config import Config
-from .download import ensure_dataset, extract_archive
 from .llm import LLMError, OpenRouterClient
+from .providers import get_provider
 from .report import format_summary, summarise, write_summary
 from .runner import Runner, default_run_name
 from .utils import get_logger, setup_logging
@@ -34,17 +34,15 @@ log = get_logger("codenet_eval.cli")
 
 def _network_hint(cfg: Config, exc: Exception) -> None:
     """Explain a failed download and how to work around no-internet hosts."""
-    log.error("Could not download %s: %s", cfg.dataset.url, exc)
+    log.error("Could not download the '%s' dataset: %s", cfg.dataset.type, exc)
     sys.stderr.write(
         "\nThe host could not reach the dataset URL (no internet / DNS, or a\n"
         "proxy is required -- common on HPC compute nodes). Options:\n"
         "  1. Behind a proxy? Set HTTPS_PROXY and forward it into the container:\n"
         "       apptainer run --env HTTPS_PROXY=$HTTPS_PROXY ... download\n"
-        "  2. Download the tarball on a networked machine (login node), place it\n"
-        f"       at {cfg.archive_path}, then run:  codenet-eval extract\n"
-        "  3. Point dataset.url at the local file and run offline:\n"
-        "       dataset: {url: file:///abs/path/Project_CodeNet.tar.gz}\n"
-        "     or:  codenet-eval download --offline   (archive already in data/)\n\n"
+        "  2. Download the dataset archive on a networked machine, place it under\n"
+        "     data/, then run:  codenet-eval download --offline   (or 'extract')\n"
+        "  3. Point the dataset URL at a local file / file:// path in the config.\n\n"
     )
 
 
@@ -90,39 +88,75 @@ def _latest_run_name(cfg: Config) -> Optional[str]:
 
 
 # --- command handlers --------------------------------------------------------
+def _maybe_cleanup_archive(cfg: Config, args: argparse.Namespace) -> None:
+    # Only CodeNet keeps a large (7.8 GB) archive worth deleting.
+    if getattr(args, "no_keep_archive", False) and cfg.dataset.type == "codenet":
+        if cfg.archive_path.exists():
+            cfg.archive_path.unlink()
+            log.info("Removed archive %s to save space", cfg.archive_path)
+
+
 def cmd_download(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
+    provider = get_provider(cfg)
     try:
-        ensure_dataset(
-            cfg,
-            force=args.force,
-            keep_archive=not args.no_keep_archive,
-            offline=args.offline,
-        )
+        provider.ensure(offline=args.offline, force=args.force)
     except requests.exceptions.RequestException as exc:
         _network_hint(cfg, exc)
         return 2
+    _maybe_cleanup_archive(cfg, args)
+    print(f"Dataset '{cfg.dataset.type}' ready under {cfg.data_path}")
     return 0
 
 
 def cmd_extract(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
-    extract_archive(cfg, force=args.force)
-    print(f"Dataset extracted to {cfg.dataset_root}")
+    # 'extract' == prepare from an already-present local archive (no network).
+    get_provider(cfg).ensure(offline=True, force=args.force)
+    print(f"Dataset '{cfg.dataset.type}' prepared under {cfg.data_path}")
     return 0
 
 
 def cmd_inspect(args: argparse.Namespace) -> int:
+    cfg = _load_config(args)
+    provider = get_provider(cfg)
+    print(f"dataset type       : {cfg.dataset.type}")
+    print(f"available languages: {provider.available_languages()}")
+    print(f"configured langs   : {cfg.languages}")
+    if not provider.is_ready():
+        print(f"NOT READY under {cfg.data_path} -- run 'download' first.")
+        return 1
+    if cfg.dataset.type == "codenet":
+        return _inspect_codenet(cfg, args)
+    return _inspect_generic(cfg, provider, args)
+
+
+def _inspect_generic(cfg: Config, provider, args: argparse.Namespace) -> int:
+    eligible = 0
+    examples = []
+    for sample in provider.iter_eligible(cfg.languages):
+        eligible += 1
+        if len(examples) < 5:
+            examples.append(sample.problem_id)
+        if eligible >= args.max_problems:
+            break
+    suffix = "+" if eligible >= args.max_problems else ""
+    print(f"eligible problems  : {eligible}{suffix} (in all configured languages)")
+    print(f"examples           : {examples}")
+    if eligible == 0:
+        print(
+            "\nNo problems solved in all configured languages. Pick languages "
+            f"from: {provider.available_languages()}"
+        )
+    return 0
+
+
+def _inspect_codenet(cfg: Config, args: argparse.Namespace) -> int:
     from collections import Counter
 
     from .dataset import CodeNetDataset
 
-    cfg = _load_config(args)
     ds = CodeNetDataset(cfg)
-    if not ds.exists():
-        print(f"Dataset not found at {ds.root} (metadata/ missing).")
-        return 1
-
     ids = ds.list_problem_ids()
     n = min(args.max_problems, len(ids))
     langs: Counter = Counter()
@@ -229,12 +263,11 @@ def cmd_report(args: argparse.Namespace) -> int:
 def cmd_all(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
     try:
-        ensure_dataset(
-            cfg, force=False, keep_archive=not args.no_keep_archive, offline=args.offline
-        )
+        get_provider(cfg).ensure(offline=args.offline)
     except requests.exceptions.RequestException as exc:
         _network_hint(cfg, exc)
         return 2
+    _maybe_cleanup_archive(cfg, args)
     runner = Runner(cfg)
     run_dir = _resolve_run_dir(cfg, args.run_name, create=True)
     runner.sample(run_dir)
@@ -260,7 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_dl = sub.add_parser("download", help="Download and extract CodeNet.")
+    p_dl = sub.add_parser("download", help="Download/prepare the configured dataset.")
     p_dl.add_argument("--force", action="store_true", help="Re-download / re-extract.")
     p_dl.add_argument("--no-keep-archive", action="store_true", help="Delete the tarball after extraction.")
     p_dl.add_argument(
