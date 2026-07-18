@@ -99,7 +99,9 @@ def test_humaneval_x_materialise_and_eligibility(tmp_path):
     cfg = Config.from_dict(
         {
             "data_dir": str(tmp_path / "data"),
-            "dataset": {"type": "humaneval_x", "humaneval_x_base_url": f"file://{base}"},
+            # wrap_functions off -> raw function materialisation (kind function).
+            "dataset": {"type": "humaneval_x", "humaneval_x_base_url": f"file://{base}",
+                        "wrap_functions": False},
             "languages": ["Python", "C++"],
         }
     )
@@ -117,6 +119,7 @@ def test_humaneval_x_materialise_and_eligibility(tmp_path):
     assert s0.units["Python"].path.read_text() == "# python prompt 0\nsol0\n"
     assert s0.units["C++"].ext == ".cpp"
     assert s0.units["Python"].unit_id == "Python/0"
+    assert s0.units["Python"].kind == "function"
 
     # A language not present in the dataset yields nothing.
     assert list(provider.iter_eligible(["Python", "Go"])) == []

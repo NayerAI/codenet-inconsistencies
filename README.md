@@ -6,27 +6,34 @@ produce different outputs**.
 
 Supports three parallel/transpilation datasets through one pipeline:
 
-| `dataset.type` | Source | Unit | Languages | Verification |
-|----------------|--------|------|-----------|--------------|
-| `codenet` | [IBM Project CodeNet](https://github.com/IBM/Project_CodeNet) | stdin/stdout **program** | C, C++, Python, Java, Go, … | ✅ run original programs |
-| `transcoder` | [TransCoder-test](https://github.com/facebookresearch/CodeGen) (GfG parallel functions) | **function** | C++, Java, Python | ✅ run LLM drivers |
-| `humaneval_x` | [HumanEval-X](https://github.com/THUDM/CodeGeeX) | **function** | Python, C++, Java, JavaScript, Go | ✅ run LLM drivers |
+| `dataset.type` | Source | Evaluated as | Languages | Verification |
+|----------------|--------|--------------|-----------|--------------|
+| `codenet` | [IBM Project CodeNet](https://github.com/IBM/Project_CodeNet) | stdin/stdout program | C, C++, Python, Java, Go, … | ✅ run programs (`programs`) |
+| `humaneval_x` | [HumanEval-X](https://github.com/THUDM/CodeGeeX) | **wrapped** program | Python, C++, Java, JavaScript, Go | ✅ run programs (`programs`) |
+| `transcoder` | [TransCoder-test](https://github.com/facebookresearch/CodeGen) (GfG parallel functions) | function | C++, Java, Python | ✅ run LLM drivers (`llm_driver`) |
 
 For a given problem each language has an implementation meant to behave
 identically, yet subtle differences — integer overflow, integer vs.
 floating-point division, rounding, output precision, parsing, off-by-one edge
 cases — can make them disagree. The framework samples problems, sends each
 language pair to an LLM (via [OpenRouter](https://openrouter.ai/)), asks it to
-find a diverging input, and then **executes both sides to confirm the claim**:
+find a diverging input, and then **executes both sides to confirm the claim**.
 
-* **programs** (CodeNet): the two original programs are run on the diverging
-  stdin and their outputs compared.
-* **functions** (TransCoder, HumanEval-X): there is no stdin/stdout harness, so
-  the LLM additionally returns a complete, self-contained **driver program per
-  language** that embeds the given function and calls it on the diverging input;
-  both drivers are executed (C++/Java/Python/Go/JavaScript) and their outputs
-  compared. The verification record is labelled `method: llm_driver`, and the
-  drivers are stored in `results.jsonl` for audit.
+TransCoder / HumanEval-X ship *functions*, not stdin/stdout programs. To
+evaluate them exactly like CodeNet, each sample is **wrapped** in a tiny
+generated driver that reads one JSON value per line from stdin (one per
+argument), calls the function, and prints the return value canonically
+(`wrap_functions`, default on). The wrapped sample is an ordinary program, so
+the *entire* CodeNet path applies unchanged — same prompt, execution
+verification (`method: programs`), Python 2/3, exit-status rules, `reverify`,
+stats. Wrapper generation is deterministic (no LLM): Python/JavaScript are
+generic; C++/Java/Go are type-directed from the `declaration`; samples whose
+signature isn't supported for a language are skipped for that language.
+
+This is currently wired for **HumanEval-X**. **TransCoder** still uses the
+fallback where the LLM returns a runnable driver per language that is executed
+independently (`method: llm_driver`, drivers stored in `results.jsonl`); the
+same fallback applies to any function dataset when `wrap_functions: false`.
 
 ---
 
@@ -143,14 +150,15 @@ Notes:
 * **TransCoder** downloads a `.tar.gz` of `facebookresearch/CodeGen` and extracts
   only `data/transcoder_evaluation_gfg/`. Point `dataset.transcoder_url` at a
   local archive / `file://` path if the host can't reach GitHub codeload.
-* **HumanEval-X** downloads five small `humaneval_<lang>.jsonl.gz` files and
-  materialises `prompt + canonical_solution` per task under
-  `data/humaneval-x/sources/`.
-* Both are **function**-level: `run` performs LLM detection and, when it claims
-  an inconsistency, verifies by executing the LLM-provided driver programs
-  (`verification.function_drivers: true`, needs go/node in addition to
-  gcc/g++/python3/javac). Set it to `false` to skip driver verification and save
-  output tokens.
+* **HumanEval-X** downloads five small `humaneval_<lang>.jsonl.gz` files and,
+  with `wrap_functions: true` (default), writes a generated stdin/stdout
+  **wrapper** per task under `data/humaneval-x/sources/` — so it runs through the
+  CodeNet program path (`method: programs`). With `wrap_functions: false` it
+  materialises the bare `prompt + canonical_solution` and verifies via LLM
+  drivers instead.
+* **TransCoder** uses the LLM-driver fallback (`method: llm_driver`), which needs
+  go/node in addition to gcc/g++/python3/javac. `verification.function_drivers:
+  false` skips driver verification (and saves output tokens).
 
 ### Offline / air-gapped / behind a proxy
 
@@ -420,6 +428,7 @@ output comparison in the verification step.
 src/codenet_eval/
   config.py         # YAML config model + validation
   providers.py      # dataset adapters: codenet / transcoder / humaneval_x
+  harness.py        # deterministic function -> stdin/stdout program wrappers
   download.py       # resumable download + safe extraction (generic + CodeNet)
   dataset.py        # read CodeNet metadata / submissions / descriptions / I/O
   sampling.py       # reproducible X% sampling

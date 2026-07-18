@@ -42,6 +42,15 @@ dataset:
   # Base URL holding per-language humaneval_<lang>.jsonl.gz (THUDM/CodeGeeX).
   humaneval_x_base_url: https://raw.githubusercontent.com/THUDM/CodeGeeX/main/codegeex/benchmark/humaneval-x
 
+  # Function datasets: wrap each sample in a generated stdin/stdout driver so it
+  # becomes a normal program (kind=program) and is evaluated EXACTLY like CodeNet
+  # -- same prompt, same execution verification. Implemented for HumanEval-X
+  # (Python/JS generic; C++/Java/Go type-directed from the declaration; samples
+  # with unsupported signatures are skipped for that language). If false, samples
+  # stay functions and are verified via LLM-written drivers. (TransCoder currently
+  # always uses the LLM-driver path.)
+  wrap_functions: true
+
 sampling:
   percent: 1.0            # X% of eligible problems (default 1%)
   seed: 42                # reproducible sampling

@@ -27,6 +27,7 @@ from typing import Iterator, Optional
 from .config import Config
 from .dataset import CodeNetDataset
 from .download import _is_within, download_url, ensure_dataset
+from .harness import UnsupportedSignature, build_wrapper
 from .utils import get_logger
 
 log = get_logger(__name__)
@@ -228,6 +229,9 @@ class HumanEvalXProvider(DatasetProvider):
         self.root = cfg.humaneval_x_root
         self.sources = self.root / "sources"     # sources/<token>/<num><ext>
         self.raw = self.root / "raw"
+        self.wrap = cfg.dataset.wrap_functions
+        self.unit_kind = "program" if self.wrap else "function"
+        self._token_lang = {tok: lang for lang, (tok, _e) in self.LANG.items()}
 
     def available_languages(self) -> list[str]:
         return list(self.LANG)
@@ -264,21 +268,30 @@ class HumanEvalXProvider(DatasetProvider):
     def _materialise(self, gz: Path, token: str, ext: str) -> None:
         outdir = self.sources / token
         outdir.mkdir(parents=True, exist_ok=True)
-        n = 0
+        language = self._token_lang[token]
+        n = skipped = 0
         for rec in _read_jsonl_gz(gz):
-            task_id = str(rec.get("task_id", ""))
-            num = task_id.split("/")[-1]
+            num = str(rec.get("task_id", "")).split("/")[-1]
             if not num:
                 continue
             # The full reference solution is prompt (signature + docstring) + body.
             code = (rec.get("prompt", "") or "") + (rec.get("canonical_solution", "") or "")
+            if self.wrap:
+                try:
+                    code = build_wrapper(language, code, rec.get("declaration", "") or "")
+                except UnsupportedSignature:
+                    skipped += 1
+                    continue  # not eligible for this language
             (outdir / f"{num}{ext}").write_text(code, encoding="utf-8")
             n += 1
-        log.info("Materialised %d HumanEval-X %s solutions", n, token)
+        log.info(
+            "Materialised %d HumanEval-X %s %s (%d unsupported skipped)",
+            n, token, "wrappers" if self.wrap else "solutions", skipped,
+        )
 
     def iter_eligible(self, languages: list[str]) -> Iterator[ProblemSample]:
         yield from _iter_parallel_files(
-            languages, self.LANG, base=self.sources, kind="function", id_prefix=True
+            languages, self.LANG, base=self.sources, kind=self.unit_kind, id_prefix=True
         )
 
 

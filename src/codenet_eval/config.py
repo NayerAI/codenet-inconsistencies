@@ -59,6 +59,13 @@ class DatasetConfig:
         "codegeex/benchmark/humaneval-x"
     )
 
+    # --- function datasets (transcoder / humaneval_x) ------------------------
+    # Wrap each function in a generated stdin/stdout driver so samples become
+    # ordinary programs and run through the exact same path as CodeNet
+    # (kind=program, execution verification). If false, samples stay functions
+    # and are verified via LLM-written drivers instead.
+    wrap_functions: bool = True
+
 
 @dataclass
 class SamplingConfig:

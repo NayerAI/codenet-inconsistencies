@@ -154,7 +154,9 @@ def _humaneval_run(tmp_path, stub):
 
     cfg = Config.from_dict({
         "data_dir": str(tmp_path / "data"),
-        "dataset": {"type": "humaneval_x", "humaneval_x_base_url": f"file://{base}"},
+        # wrap_functions off -> exercise the LLM-driver (function) path.
+        "dataset": {"type": "humaneval_x", "humaneval_x_base_url": f"file://{base}",
+                    "wrap_functions": False},
         "languages": ["Python", "C++"],
         "pairing": {"strategy": "all"},
         "verification": {"enabled": True},
