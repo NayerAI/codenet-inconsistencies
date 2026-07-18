@@ -109,3 +109,51 @@ def test_verify_function_divergence_missing_driver():
     r = verify_function_divergence(VCFG, "Python", None, ".py", "C++", "x", ".cpp", "f(7)")
     assert r["status"] == "skipped"
     assert r["method"] == "llm_driver"
+
+
+# --- exit-status-aware classification (regression for false positives) -----
+@pytest.mark.skipif(shutil.which("gcc") is None or shutil.which("python3") is None,
+                    reason="gcc + python3 required")
+def test_syntax_error_is_inconclusive_not_confirmed():
+    py2 = 'print "hello"\n'  # SyntaxError under python3 (Py2 print statement)
+    c = '#include <stdio.h>\nint main(){printf("world\\n");return 0;}\n'
+    r = verify_divergence(VCFG, "Python", py2, ".py", "C", c, ".c", "")
+    assert r["status"] == "inconclusive"          # NOT confirmed
+    assert r["strong_semantic_diff"] is False
+    assert "program_a" in r.get("inconclusive_reason", {})
+
+
+@pytest.mark.skipif(shutil.which("gcc") is None or shutil.which("python3") is None,
+                    reason="gcc + python3 required")
+def test_strong_vs_weak_semantic_diff():
+    prints_2 = '#include <stdio.h>\nint main(){printf("2\\n");return 0;}\n'
+    # both exit 0, both non-empty, differ -> strong
+    r = verify_divergence(VCFG, "Python", "print(1)\n", ".py", "C", prints_2, ".c", "")
+    assert r["status"] == "confirmed"
+    assert r["strong_semantic_diff"] is True
+    assert r["both_nonempty"] is True
+    # clean run that prints nothing vs one that prints -> confirmed but WEAK
+    r2 = verify_divergence(VCFG, "Python", "pass\n", ".py", "C", prints_2, ".c", "")
+    assert r2["status"] == "confirmed"
+    assert r2["both_nonempty"] is False
+    assert r2["strong_semantic_diff"] is False
+
+
+def test_numpy_available_for_python3():
+    import importlib.util
+    if importlib.util.find_spec("numpy") is None:
+        pytest.skip("numpy not installed")
+    src = "import numpy as np\nprint(int(np.array([1,2,3]).sum()))\n"
+    res = run_program("Python", src, ".py", "", VCFG)
+    assert res.clean, res.error
+    assert res.stdout.strip() == "6"
+
+
+@pytest.mark.skipif(shutil.which("python2") is None, reason="python2 required")
+def test_python2_fallback_runs_py2_only_snippet():
+    from codenet_eval.config import VerificationConfig
+    cfg = VerificationConfig(python_bins=["python3", "python2"])
+    res = run_program("Python", 'print "hi"\n', ".py", "", cfg)
+    assert res.clean
+    assert res.interpreter == "python2"     # python3 failed, python2 rescued it
+    assert res.stdout.strip() == "hi"

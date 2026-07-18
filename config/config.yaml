@@ -82,7 +82,7 @@ verification:
   compile_timeout_seconds: 30
   max_output_bytes: 100000
   memory_limit_mb: 1024
-  python_bin: python3
+  python_bins: [python3, python2]   # try each; first clean run (exit 0) wins
   gcc_bin: gcc
   gpp_bin: g++
   javac_bin: javac

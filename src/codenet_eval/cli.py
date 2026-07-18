@@ -7,6 +7,7 @@ Subcommands::
     codenet-eval inspect    # diagnose languages present + eligibility
     codenet-eval sample     # pick X% of eligible problems -> manifest.jsonl
     codenet-eval run        # query the LLM per language pair -> results.jsonl
+    codenet-eval reverify   # recompute verification verdicts (no LLM calls)
     codenet-eval report     # summarise a run
     codenet-eval all        # download + sample + run + report
 
@@ -251,6 +252,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reverify(args: argparse.Namespace) -> int:
+    cfg = _load_config(args)
+    runner = Runner(cfg)
+    run_dir = _resolve_run_dir(cfg, args.run_name, create=False)
+    updated, _ = runner.reverify(run_dir, reexecute=not args.reclassify_only)
+    print(f"Re-verified {updated} records in {run_dir}")
+    summary = summarise(run_dir)
+    write_summary(run_dir, summary)
+    print(format_summary(summary))
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
     run_dir = _resolve_run_dir(cfg, args.run_name, create=False)
@@ -335,6 +348,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_report = sub.add_parser("report", help="Summarise a completed run.")
     p_report.add_argument("--run-name", default=None)
     p_report.set_defaults(func=cmd_report)
+
+    p_reverify = sub.add_parser(
+        "reverify",
+        help="Recompute verification verdicts for a run (no LLM calls).",
+    )
+    p_reverify.add_argument("--run-name", default=None)
+    p_reverify.add_argument(
+        "--reclassify-only", action="store_true",
+        help="Only re-apply the rules to stored run data; do not re-execute.",
+    )
+    p_reverify.set_defaults(func=cmd_reverify)
 
     p_all = sub.add_parser("all", help="download + sample + run + report.")
     p_all.add_argument("--run-name", default=None)

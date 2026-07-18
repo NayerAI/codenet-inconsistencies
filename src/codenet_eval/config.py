@@ -121,7 +121,10 @@ class VerificationConfig:
     max_output_bytes: int = 100_000
     # Address-space limit per executed program (MiB); 0 disables the limit.
     memory_limit_mb: int = 1024
-    python_bin: str = "python3"
+    # CodeNet mixes Python 2 and 3. Interpreters are tried in order; the first
+    # that runs cleanly (exit 0) is used, so a Py2-only snippet still runs.
+    python_bins: list[str] = field(default_factory=lambda: ["python3", "python2"])
+    python_bin: str = "python3"   # legacy fallback if python_bins is empty
     gcc_bin: str = "gcc"
     gpp_bin: str = "g++"
     javac_bin: str = "javac"

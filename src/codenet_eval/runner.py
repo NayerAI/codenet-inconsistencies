@@ -13,6 +13,7 @@ and resumable:
 from __future__ import annotations
 
 import datetime as _dt
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -24,8 +25,8 @@ from .pairing import language_pairs
 from .prompts import build_messages
 from .providers import ProblemSample, get_provider
 from .sampling import select_problem_ids
-from .utils import append_jsonl, get_logger, read_jsonl, write_jsonl
-from .verification import verify_divergence, verify_function_divergence
+from .utils import append_jsonl, get_logger, read_jsonl, read_text_best_effort, write_jsonl
+from .verification import reclassify_verification, verify_divergence, verify_function_divergence
 
 log = get_logger(__name__)
 
@@ -209,6 +210,72 @@ class Runner:
                 "timestamp": _now(),
                 "error": f"{type(exc).__name__}: {exc}",
             }
+
+    # --- re-verification (apply fixed rules / re-run without the LLM) --------
+    def reverify(self, run_dir: Path, reexecute: bool = True) -> tuple[int, Path]:
+        """Recompute verification verdicts for an existing run WITHOUT calling
+        the LLM. ``reexecute`` re-runs the programs/drivers (picking up Python2
+        and numpy); otherwise verdicts are only reclassified from stored run data.
+        The original results.jsonl is backed up to results.jsonl.bak.
+        """
+        results_path = run_dir / RESULTS_NAME
+        if not results_path.is_file():
+            raise FileNotFoundError(f"No results at {results_path}")
+        rows = list(read_jsonl(results_path))
+
+        manifest_map: dict[str, dict] = {}
+        man_path = run_dir / MANIFEST_NAME
+        if man_path.is_file():
+            for m in read_jsonl(man_path):
+                manifest_map[m["problem_id"]] = m
+
+        updated = 0
+        for row in rows:
+            v = row.get("verification")
+            if not v:
+                continue
+            if reexecute and row.get("inconsistent") and row.get("divergence_input") is not None:
+                new_v = self._reexecute_verification(row, manifest_map)
+            else:
+                new_v = reclassify_verification(v)
+            if new_v is not v:
+                row["verification"] = new_v
+                updated += 1
+
+        backup = results_path.with_suffix(".jsonl.bak")
+        if not backup.exists():
+            shutil.copy2(results_path, backup)
+        write_jsonl(results_path, rows)
+        log.info("Re-verified %d records (backup: %s)", updated, backup)
+        return updated, results_path
+
+    def _reexecute_verification(self, row: dict, manifest_map: dict) -> dict:
+        pid = row["problem_id"]
+        lang_a, lang_b = row["language_a"], row["language_b"]
+        div = row.get("divergence_input")
+        kind = row.get("kind", "program")
+        man = manifest_map.get(pid) or {}
+        subs = man.get("submissions", {})
+        sub_a, sub_b = subs.get(lang_a), subs.get(lang_b)
+
+        if kind == "function":
+            ext_a = (sub_a or {}).get("filename_ext", "")
+            ext_b = (sub_b or {}).get("filename_ext", "")
+            return verify_function_divergence(
+                self.cfg.verification, lang_a, row.get("program_a"), ext_a,
+                lang_b, row.get("program_b"), ext_b, div,
+            )
+
+        # program kind: need the original sources from the manifest.
+        if not (sub_a and sub_b and Path(sub_a["path"]).is_file() and Path(sub_b["path"]).is_file()):
+            log.warning("%s %s/%s: source unavailable; reclassifying instead", pid, lang_a, lang_b)
+            return reclassify_verification(row["verification"])
+        code_a = read_text_best_effort(Path(sub_a["path"]), self.cfg.llm.max_code_chars)
+        code_b = read_text_best_effort(Path(sub_b["path"]), self.cfg.llm.max_code_chars)
+        return verify_divergence(
+            self.cfg.verification, lang_a, code_a, sub_a["filename_ext"],
+            lang_b, code_b, sub_b["filename_ext"], str(div),
+        )
 
     def _evaluate_pair(
         self,

@@ -53,6 +53,13 @@ class RunResult:
     stderr: str
     timed_out: bool
     error: Optional[str]
+    # For Python: which interpreter actually produced this result (py2/py3).
+    interpreter: Optional[str] = None
+
+    @property
+    def clean(self) -> bool:
+        """A trustworthy run: it executed, did not time out, and exited 0."""
+        return self.ran and not self.timed_out and self.returncode == 0
 
 
 def _preexec(cpu_seconds: int, mem_bytes: int):
@@ -166,20 +173,37 @@ def _mem_bytes(cfg: VerificationConfig) -> int:
     return cfg.memory_limit_mb * 1024 * 1024 if cfg.memory_limit_mb > 0 else 0
 
 
+def _python_bins(cfg) -> list:
+    """Interpreters to try, in order. CodeNet mixes Python 2 and 3, so we try
+    each and accept the first that runs cleanly (exit 0)."""
+    bins = list(getattr(cfg, "python_bins", None) or [cfg.python_bin])
+    return [b for b in bins if shutil.which(b) is not None]
+
+
 def _run_python(tmpdir, source, ext, input_text, cfg, language) -> RunResult:
-    if shutil.which(cfg.python_bin) is None:
+    bins = _python_bins(cfg)
+    if not bins:
         return RunResult(language, True, False, False, None, "", "", False, "python not available")
     src = tmpdir / f"main{ext or '.py'}"
     src.write_text(source, encoding="utf-8")
-    proc = _run(
-        [cfg.python_bin, str(src)], tmpdir, input_text,
-        cfg.run_timeout_seconds, cfg.run_timeout_seconds, _mem_bytes(cfg),
-    )
-    return RunResult(
-        language, True, True, True, proc.returncode,
-        _truncate(proc.stdout, cfg.max_output_bytes),
-        _truncate(proc.stderr, cfg.max_output_bytes), False, None,
-    )
+
+    last: Optional[RunResult] = None
+    for interpreter in bins:
+        proc = _run(
+            [interpreter, str(src)], tmpdir, input_text,
+            cfg.run_timeout_seconds, cfg.run_timeout_seconds, _mem_bytes(cfg),
+        )
+        res = RunResult(
+            language, True, True, True, proc.returncode,
+            _truncate(proc.stdout, cfg.max_output_bytes),
+            _truncate(proc.stderr, cfg.max_output_bytes), False,
+            None if proc.returncode == 0 else f"{interpreter} exited {proc.returncode}",
+            interpreter=interpreter,
+        )
+        if proc.returncode == 0:
+            return res            # first interpreter that runs cleanly wins
+        last = res
+    return last  # none ran cleanly; report the last attempt (marked unclean)
 
 
 def _run_compiled_c(tmpdir, kind, source, ext, input_text, cfg, language) -> RunResult:
@@ -340,20 +364,83 @@ def verify_function_divergence(
     )
 
 
+def _runresult_from_dict(d: dict) -> RunResult:
+    return RunResult(
+        language=d.get("language", ""),
+        supported=d.get("supported", True),
+        compiled=d.get("compiled", True),
+        ran=d.get("ran", False),
+        returncode=d.get("returncode"),
+        stdout=d.get("stdout") or "",
+        stderr=d.get("stderr") or "",
+        timed_out=d.get("timed_out", False),
+        error=d.get("error"),
+        interpreter=d.get("interpreter"),
+    )
+
+
+def reclassify_verification(v: Optional[dict]) -> Optional[dict]:
+    """Recompute a verification verdict from its stored program run data, with no
+    re-execution. Applies the current (exit-status-aware) rules so old results
+    where a crash/SyntaxError was mislabelled 'confirmed' become 'inconclusive'."""
+    if not v or "program_a" not in v or "program_b" not in v:
+        return v  # skipped / no execution data -> leave untouched
+    a = _runresult_from_dict(v["program_a"])
+    b = _runresult_from_dict(v["program_b"])
+    extra = {"input": v["input"]} if "input" in v else {}
+    return _compare_results(a, b, v.get("method", "programs"), extra)
+
+
+def _run_reason(result: RunResult) -> Optional[str]:
+    if not result.ran:
+        return result.error or "did not run"
+    if result.timed_out:
+        return "timed out"
+    if result.returncode != 0:
+        return result.error or f"exited {result.returncode}"
+    return None
+
+
 def _compare_results(result_a, result_b, method: str, extra: dict) -> dict:
-    both_ran = result_a.ran and result_b.ran and not result_a.timed_out and not result_b.timed_out
+    out_a = normalise_output(result_a.stdout)
+    out_b = normalise_output(result_b.stdout)
+
     outputs_differ: Optional[bool] = None
-    if both_ran:
-        outputs_differ = normalise_output(result_a.stdout) != normalise_output(result_b.stdout)
+    if result_a.ran and result_b.ran:
+        outputs_differ = out_a != out_b
+
+    # A difference only counts if BOTH sides ran cleanly (executed, no timeout,
+    # exit code 0). Otherwise a crash / SyntaxError / missing import would masquerade
+    # as a semantic divergence -- these are 'inconclusive', not 'confirmed'.
+    both_clean = result_a.clean and result_b.clean
+    if both_clean:
         status = "confirmed" if outputs_differ else "refuted"
     else:
         status = "inconclusive"
 
-    return {
+    both_nonempty = bool(out_a) and bool(out_b)
+    # Strongest evidence of differing semantics: both exit 0, both print
+    # something, and the outputs differ.
+    strong = bool(both_clean and outputs_differ and both_nonempty)
+
+    reasons = {}
+    ra, rb = _run_reason(result_a), _run_reason(result_b)
+    if ra:
+        reasons["program_a"] = ra
+    if rb:
+        reasons["program_b"] = rb
+
+    record = {
         "status": status,                 # confirmed | refuted | inconclusive | skipped
         "method": method,                 # "programs" | "llm_driver"
         "outputs_differ": outputs_differ,
+        "both_exit_zero": bool(result_a.returncode == 0 and result_b.returncode == 0),
+        "both_nonempty": both_nonempty,
+        "strong_semantic_diff": strong,
         **extra,
         "program_a": asdict(result_a),
         "program_b": asdict(result_b),
     }
+    if reasons:
+        record["inconclusive_reason"] = reasons
+    return record

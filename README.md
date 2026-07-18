@@ -323,16 +323,51 @@ A `results.jsonl` row looks like:
   "verification": {
     "status": "confirmed",
     "outputs_differ": true,
-    "program_a": {"stdout": "3", "...": "..."},
-    "program_b": {"stdout": "3.5", "...": "..."}
+    "both_exit_zero": true,
+    "both_nonempty": true,
+    "strong_semantic_diff": true,
+    "program_a": {"stdout": "3", "returncode": 0, "interpreter": "python3", "...": "..."},
+    "program_b": {"stdout": "3.5", "returncode": 0, "...": "..."}
   }
 }
 ```
 
-Verification `status` is `confirmed` (outputs really differ), `refuted` (they
-match — LLM false positive), `inconclusive` (a program failed to compile/run or
-timed out), or `skipped`. `method` is `programs` (CodeNet, original programs) or
-`llm_driver` (function datasets, executed LLM driver programs).
+Verification `status`:
+
+* `confirmed` — **both** sides exited 0 (a clean run) and their outputs differ.
+* `refuted` — both exited 0 and outputs match (LLM false positive).
+* `inconclusive` — a side crashed / failed to compile / timed out, so the
+  difference cannot be trusted (see `inconclusive_reason`). A `SyntaxError`,
+  segfault or missing import lands here — **never** `confirmed`.
+* `skipped` — nothing to verify.
+
+`method` is `programs` (CodeNet, original programs) or `llm_driver` (function
+datasets, executed LLM driver programs). `strong_semantic_diff` is the strongest
+evidence: **both exit 0, both print something, and the outputs differ.**
+
+The report separates `confirmed` into `strong` and `weak` (one side ran cleanly
+but printed nothing), and breaks `inconclusive` down by failing reason.
+
+### Python 2 vs 3
+
+CodeNet mixes Python 2 and 3. Verification tries the interpreters in
+`verification.python_bins` (default `[python3, python2]`) and accepts the first
+**clean** run, so a Py2-only snippet is executed under Python 2 instead of
+failing with a `SyntaxError`. `numpy` is installed for both in the Apptainer
+image.
+
+### Re-verifying an existing run
+
+`reverify` recomputes verdicts for a finished run **without any LLM calls**
+(results.jsonl is backed up to `.bak` first):
+
+```bash
+codenet-eval reverify --run-name run1                 # re-execute (uses Py2 + numpy)
+codenet-eval reverify --run-name run1 --reclassify-only  # just re-apply the rules
+```
+
+Use it to apply the exit-status-aware rules (and Python 2 / numpy) to results
+produced by an older version.
 
 ---
 

@@ -35,6 +35,20 @@ def summarise(run_dir: Path) -> dict:
     refuted = verif_status.get("refuted", 0)
     verified_total = confirmed + refuted
 
+    # Strongest evidence of differing semantics: both programs exit 0, both print
+    # something, and their outputs differ.
+    strong = sum(1 for v in verifications if v.get("strong_semantic_diff"))
+    # Among confirmed, how many are "weak" (a clean run that printed nothing).
+    confirmed_weak = confirmed - sum(
+        1 for v in verifications if v.get("status") == "confirmed" and v.get("strong_semantic_diff")
+    )
+    # Why checks were inconclusive (which side failed, e.g. "exited 1").
+    inconclusive_reasons: Counter = Counter()
+    for v in verifications:
+        if v.get("status") == "inconclusive":
+            for side in (v.get("inconclusive_reason") or {}).values():
+                inconclusive_reasons[side] += 1
+
     tokens = sum((r.get("usage") or {}).get("total_tokens", 0) or 0 for r in rows)
 
     summary = {
@@ -52,11 +66,15 @@ def summarise(run_dir: Path) -> dict:
             # 'attempted' counts executed checks (skipped function-level ones excluded).
             "attempted": confirmed + refuted + verif_status.get("inconclusive", 0),
             "confirmed": confirmed,
+            "confirmed_strong": strong,
+            "confirmed_weak": confirmed_weak,
             "refuted": refuted,
             "inconclusive": verif_status.get("inconclusive", 0),
             "skipped": verif_status.get("skipped", 0),
             "precision_on_verified": (confirmed / verified_total) if verified_total else None,
+            "inconclusive_reasons": dict(inconclusive_reasons.most_common(10)),
         },
+        "strong_semantic_differences": strong,
         "total_tokens": tokens,
     }
     return summary
@@ -83,12 +101,18 @@ def format_summary(summary: dict) -> str:
         "verification (of inconsistent claims):",
         f"  attempted        : {v['attempted']}",
         f"  confirmed (differ): {v['confirmed']}",
+        f"    strong (both exit0, both non-empty, differ): {v.get('confirmed_strong', 0)}",
+        f"    weak (one side printed nothing)           : {v.get('confirmed_weak', 0)}",
         f"  refuted (same)   : {v['refuted']}",
         f"  inconclusive     : {v['inconclusive']}",
         f"  skipped (func)   : {v.get('skipped', 0)}",
         f"  precision        : {_pct(v['precision_on_verified'])}",
         f"total tokens       : {summary['total_tokens']}",
     ]
+    if v.get("inconclusive_reasons"):
+        lines.append("inconclusive reasons (per failing side):")
+        for reason, count in v["inconclusive_reasons"].items():
+            lines.append(f"  {reason:40s} {count}")
     if summary["categories"]:
         lines.append("top inconsistency categories:")
         for cat, count in list(summary["categories"].items())[:10]:
