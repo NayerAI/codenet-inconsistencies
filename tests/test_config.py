@@ -64,3 +64,18 @@ def test_dataset_type_default_and_override():
     cfg = Config.from_dict({"dataset": {"type": "humaneval_x"}})
     cfg.validate()
     assert cfg.dataset.type == "humaneval_x"
+
+
+def test_experiment_defaults_and_validation():
+    assert Config.from_dict({}).experiment.type == "inconsistency"
+    # transpilation requires humaneval_x
+    with pytest.raises(ValueError):
+        Config.from_dict({"experiment": {"type": "transpilation"}}).validate()
+    with pytest.raises(ValueError):
+        Config.from_dict({"experiment": {"type": "nope"}}).validate()
+    cfg = Config.from_dict({
+        "dataset": {"type": "humaneval_x"},
+        "experiment": {"type": "transpilation"},
+    })
+    cfg.validate()
+    assert cfg.experiment.type == "transpilation"

@@ -294,6 +294,21 @@ class HumanEvalXProvider(DatasetProvider):
             languages, self.LANG, base=self.sources, kind=self.unit_kind, id_prefix=True
         )
 
+    def load_records(self) -> dict[str, dict[str, dict]]:
+        """Return ``{problem_num: {language: raw_record}}`` from the raw jsonl.gz
+        (with prompt, canonical_solution, declaration, test). Used by the
+        transpilation experiment, which needs the unwrapped sources + tests."""
+        out: dict[str, dict[str, dict]] = {}
+        for lang, (token, _ext) in self.LANG.items():
+            gz = self.raw / f"humaneval_{token}.jsonl.gz"
+            if not gz.is_file():
+                continue
+            for rec in _read_jsonl_gz(gz):
+                num = str(rec.get("task_id", "")).split("/")[-1]
+                if num:
+                    out.setdefault(num, {})[lang] = rec
+        return out
+
 
 # --------------------------------------------------------------------------- #
 # Shared helpers

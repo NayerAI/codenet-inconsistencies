@@ -12,6 +12,7 @@ Both ask for the same strict JSON schema so downstream parsing is uniform.
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 _SCHEMA = """\
@@ -95,6 +96,52 @@ SYSTEM_PROMPT_FUNCTION_DRIVERS = f"{_FUNCTION_INTRO}\n\n{_DRIVER_SCHEMA}\n"
 def _code_block(language: str, code: str) -> str:
     fence = language.lower().replace("++", "pp").replace("#", "sharp")
     return f"```{fence}\n{code}\n```"
+
+
+# --- transpilation experiment ----------------------------------------------
+SYSTEM_PROMPT_TRANSPILE = """\
+You are an expert programmer performing code translation. Translate the given \
+function from the source language to the target language while EXACTLY \
+preserving its semantics: for every input, the translated function must return \
+the SAME value the source function returns. Do not "fix", improve, or idiomise \
+behaviour -- reproduce it faithfully, including any edge-case, overflow, \
+rounding or truncation behaviour.
+
+Keep the target function's name and signature exactly as given in the target \
+declaration. Output ONLY the target-language code for the function (with any \
+imports it needs). No explanation, no markdown fences.
+"""
+
+
+def build_transpile_messages(
+    source_language: str,
+    source_code: str,
+    target_language: str,
+    target_declaration: str,
+) -> list[dict[str, str]]:
+    user = (
+        f"Source language: {source_language}\n"
+        f"Target language: {target_language}\n\n"
+        f"Target declaration (keep this exact signature):\n{target_declaration}\n\n"
+        f"Source function to translate:\n{_code_block(source_language, source_code)}\n\n"
+        f"Return only the {target_language} code."
+    )
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT_TRANSPILE},
+        {"role": "user", "content": user},
+    ]
+
+
+_FENCE = re.compile(r"```[a-zA-Z0-9_+#]*\n(.*?)```", re.DOTALL)
+
+
+def extract_code(text: str) -> str:
+    """Pull code out of an LLM reply: the first fenced block if present, else
+    the whole text (stripped)."""
+    if not text:
+        return ""
+    m = _FENCE.search(text)
+    return (m.group(1) if m else text).strip()
 
 
 def build_messages(

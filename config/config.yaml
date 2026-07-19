@@ -106,6 +106,20 @@ execution:
   # limits (the client retries 429s). Override per run with --workers N.
   workers: 4
 
+experiment:
+  # "inconsistency": find an input on which two implementations of the same
+  #    problem diverge (default; all datasets).
+  # "transpilation": HumanEval-X only. Translate a source snippet to a target
+  #    language preserving exact semantics, then check it against the target vs.
+  #    source reference on the test inputs. Categories: false_negative (strict
+  #    source semantics kept but target tests reject -- the case of interest),
+  #    relaxed, consistent, incorrect.
+  type: inconsistency
+  max_test_inputs: 40     # transpilation: cap test inputs per unit
+
+# Tip: preview any experiment without calling the LLM and count planned calls:
+#   codenet-eval -c config.yaml run --dry-run
+
 output:
   results_dir: results   # relative to data_dir (so results live under data/)
   run_name: null         # null -> a timestamped run directory is created

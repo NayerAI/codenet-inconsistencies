@@ -80,6 +80,58 @@ def summarise(run_dir: Path) -> dict:
     return summary
 
 
+def summarise_transpilation(run_dir: Path) -> dict:
+    results_path = run_dir / RESULTS_NAME
+    if not results_path.is_file():
+        raise FileNotFoundError(f"No results found at {results_path}")
+    rows = list(read_jsonl(results_path))
+    total = len(rows)
+    llm_errors = sum(1 for r in rows if r.get("llm_error"))
+    evaluated = [r for r in rows if r.get("category")]
+    cats = Counter(r.get("category") for r in evaluated)
+    pairs = Counter(f"{r['source_language']}->{r['target_language']}" for r in rows)
+    # Units that could even show the phenomenon (a distinguishing input exists).
+    with_distinguishing = sum(1 for r in evaluated if (r.get("n_distinguishing") or 0) > 0)
+    false_neg = cats.get("false_negative", 0)
+    tokens = sum((r.get("usage") or {}).get("total_tokens", 0) or 0 for r in rows)
+    denom = false_neg + cats.get("relaxed", 0) + cats.get("consistent", 0) + cats.get("incorrect", 0)
+    return {
+        "run_dir": str(run_dir),
+        "experiment": "transpilation",
+        "total_units": total,
+        "llm_errors": llm_errors,
+        "evaluated": len(evaluated),
+        "categories": dict(cats.most_common()),
+        "false_negatives": false_neg,
+        "false_negative_rate": (false_neg / denom) if denom else None,
+        "units_with_distinguishing_input": with_distinguishing,
+        "pairs": dict(pairs.most_common()),
+        "total_tokens": tokens,
+    }
+
+
+def format_transpilation_summary(s: dict) -> str:
+    c = s["categories"]
+    lines = [
+        "==================== transpilation experiment ====================",
+        f"run dir            : {s['run_dir']}",
+        f"total units        : {s['total_units']}",
+        f"  llm errors       : {s['llm_errors']}",
+        f"  evaluated        : {s['evaluated']}",
+        f"units w/ distinguishing input : {s['units_with_distinguishing_input']}",
+        "categories:",
+        f"  false_negative (strict source kept, target tests reject): {c.get('false_negative', 0)}",
+        f"  relaxed        (matched target semantics)               : {c.get('relaxed', 0)}",
+        f"  consistent     (matched both)                           : {c.get('consistent', 0)}",
+        f"  incorrect      (matched neither)                        : {c.get('incorrect', 0)}",
+        f"  inconclusive   (references not runnable)                : {c.get('inconclusive', 0)}",
+        f"false-negative rate : {_pct(s['false_negative_rate'])}",
+        f"total tokens        : {s['total_tokens']}",
+        "==================================================================",
+    ]
+    return "\n".join(lines)
+
+
 def write_summary(run_dir: Path, summary: dict) -> Path:
     out = run_dir / "summary.json"
     out.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")

@@ -149,6 +149,22 @@ class ExecutionConfig:
     workers: int = 4
 
 
+EXPERIMENT_TYPES = ("inconsistency", "transpilation")
+
+
+@dataclass
+class ExperimentConfig:
+    # "inconsistency": ask the LLM for an input on which two implementations of
+    #   the same problem diverge (the default; works for all datasets).
+    # "transpilation": HumanEval-X only. Transpile a source snippet to a target
+    #   language "preserving exact semantics", then check whether it matches the
+    #   target vs. source reference on the test inputs -- to find strict
+    #   transpilations that HumanEval-X's target tests would (falsely) reject.
+    type: str = "inconsistency"
+    # transpilation: cap on test inputs evaluated per unit (from the Python test).
+    max_test_inputs: int = 40
+
+
 @dataclass
 class OutputConfig:
     # Results directory, relative to ``data_dir`` (or absolute).
@@ -169,6 +185,7 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     verification: VerificationConfig = field(default_factory=VerificationConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
     # --- derived paths -------------------------------------------------------
@@ -231,6 +248,7 @@ class Config:
             llm=LLMConfig(**data.get("llm", {})),
             verification=VerificationConfig(**data.get("verification", {})),
             execution=ExecutionConfig(**data.get("execution", {})),
+            experiment=ExperimentConfig(**data.get("experiment", {})),
             output=OutputConfig(**data.get("output", {})),
         )
 
@@ -250,6 +268,12 @@ class Config:
             raise ValueError(
                 f"dataset.type must be one of {DATASET_TYPES}, got {self.dataset.type!r}"
             )
+        if self.experiment.type not in EXPERIMENT_TYPES:
+            raise ValueError(
+                f"experiment.type must be one of {EXPERIMENT_TYPES}, got {self.experiment.type!r}"
+            )
+        if self.experiment.type == "transpilation" and self.dataset.type != "humaneval_x":
+            raise ValueError("experiment.type 'transpilation' requires dataset.type 'humaneval_x'")
         if len(self.languages) < 2:
             raise ValueError("At least two languages are required for pairwise comparison")
         if len(set(self.languages)) != len(self.languages):

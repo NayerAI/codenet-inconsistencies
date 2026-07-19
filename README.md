@@ -59,6 +59,45 @@ All persistent data — the dataset **and** every result — lives under a singl
 
 ---
 
+## Experiments
+
+Two experiment types, selected by `experiment.type`:
+
+* **`inconsistency`** (default, all datasets) — ask the LLM for an input on which
+  two implementations of the same problem diverge, then verify by execution.
+* **`transpilation`** (HumanEval-X only) — ask the LLM to translate a source
+  snippet to a target language *preserving exact semantics*, then check the
+  translation against the **target** and the **source** reference on the
+  problem's test inputs:
+
+  | passes target tests | passes source tests | category |
+  |---|---|---|
+  | ✓ | ✓ | `consistent` (no divergence on these inputs) |
+  | ✓ | ✗ | `relaxed` (matched target/relaxed semantics) |
+  | ✗ | ✓ | **`false_negative`** (strict source semantics kept, but the target tests reject it) |
+  | ✗ | ✗ | `incorrect` |
+
+  The `false_negative` count is a lower-bound estimate of how often HumanEval-X's
+  per-language tests reject a *strictly correct* transpilation. Reference outputs
+  are computed by executing the wrapped reference implementations, so the
+  comparison is on equal, canonical footing.
+
+  ```bash
+  codenet-eval -c config/config.yaml run   # experiment.type: transpilation, dataset.type: humaneval_x
+  ```
+
+**Dry run** — preview any experiment without calling the LLM (counts samples and
+planned LLM calls), to check everything works and estimate cost:
+
+```bash
+codenet-eval -c config/config.yaml run --dry-run
+# ==================== DRY RUN (no LLM calls) ====================
+# sampled units/problems : 45
+# planned LLM calls      : 45
+```
+
+---
+
 ## Requirements addressed
 
 | # | Requirement | Where |
@@ -429,6 +468,8 @@ src/codenet_eval/
   config.py         # YAML config model + validation
   providers.py      # dataset adapters: codenet / transcoder / humaneval_x
   harness.py        # deterministic function -> stdin/stdout program wrappers
+  transpilation.py  # transpilation false-negative experiment (HumanEval-X)
+  hxtest.py         # parse test inputs from HumanEval-X test fields
   download.py       # resumable download + safe extraction (generic + CodeNet)
   dataset.py        # read CodeNet metadata / submissions / descriptions / I/O
   sampling.py       # reproducible X% sampling

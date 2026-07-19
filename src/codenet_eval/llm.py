@@ -60,15 +60,18 @@ class OpenRouterClient:
         headers.update(self.cfg.extra_headers or {})
         return headers
 
-    def complete(self, messages: list[dict[str, str]]) -> LLMResponse:
+    def complete(
+        self, messages: list[dict[str, str]], json_object: Optional[bool] = None
+    ) -> LLMResponse:
         payload: dict[str, Any] = {
             "model": self.cfg.model,
             "messages": messages,
             "temperature": self.cfg.temperature,
             "max_tokens": self.cfg.max_tokens,
         }
-        if self.cfg.json_mode:
-            # Ask providers that support it for a JSON object.
+        # json_object overrides cfg.json_mode (transpilation wants raw code, not JSON).
+        want_json = self.cfg.json_mode if json_object is None else json_object
+        if want_json:
             payload["response_format"] = {"type": "json_object"}
 
         last_error: Optional[Exception] = None
