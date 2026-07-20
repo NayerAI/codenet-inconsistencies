@@ -32,21 +32,30 @@ def _ok_resp():
                            "usage": {"total_tokens": 3}})
 
 
-def test_non_json_body_is_retried_then_recovers(monkeypatch):
-    client = OpenRouterClient(LLMConfig(model="m", max_retries=3, json_mode=False), api_key="k")
-    monkeypatch.setattr(client, "_sleep", lambda *a, **k: None)
-    seq = iter([_BadJsonResp(), _BadJsonResp(), _ok_resp()])
-    monkeypatch.setattr(client.session, "post", lambda *a, **k: next(seq))
-    resp = client.complete([{"role": "user", "content": "x"}])
-    assert resp.parsed == {"inconsistent": True}   # recovered on the 3rd attempt
+def test_non_json_body_is_llm_error_without_retry(monkeypatch):
+    # A non-JSON body is an LLM OUTPUT error: raise LLMError immediately, no retry.
+    client = OpenRouterClient(LLMConfig(model="m", max_retries=4, json_mode=False), api_key="k")
+    monkeypatch.setattr(client, "_sleep", lambda *a, **k: pytest.fail("must not retry"))
+    calls = {"n": 0}
 
+    def post(*a, **k):
+        calls["n"] += 1
+        return _BadJsonResp()
 
-def test_non_json_body_exhausts_retries_as_llm_error(monkeypatch):
-    client = OpenRouterClient(LLMConfig(model="m", max_retries=2, json_mode=False), api_key="k")
-    monkeypatch.setattr(client, "_sleep", lambda *a, **k: None)
-    monkeypatch.setattr(client.session, "post", lambda *a, **k: _BadJsonResp())
+    monkeypatch.setattr(client.session, "post", post)
     with pytest.raises(LLMError):        # not a raw JSONDecodeError
         client.complete([{"role": "user", "content": "x"}])
+    assert calls["n"] == 1               # exactly one call, no retries
+
+
+def test_retryable_http_still_retries(monkeypatch):
+    # Infrastructure errors (429/5xx) are NOT output errors -> still retried.
+    client = OpenRouterClient(LLMConfig(model="m", max_retries=3, json_mode=False), api_key="k")
+    monkeypatch.setattr(client, "_sleep", lambda *a, **k: None)
+    seq = iter([_FakeResp(503, {}), _ok_resp()])
+    monkeypatch.setattr(client.session, "post", lambda *a, **k: next(seq))
+    resp = client.complete([{"role": "user", "content": "x"}])
+    assert resp.parsed == {"inconsistent": True}
 
 
 def test_client_requires_api_key(monkeypatch):
