@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
@@ -63,26 +64,39 @@ class RunResult:
 
 
 def _preexec(cpu_seconds: int, mem_bytes: int):
-    """Return a preexec_fn capping CPU time and (optionally) address space.
+    """preexec_fn that (a) starts a new session so the child + any processes it
+    spawns form one killable group, and (b) caps CPU time and address space.
 
     ``mem_bytes == 0`` disables the address-space cap.  We disable it for the
     JVM (which reserves a huge virtual address space up front and would fail to
     start under RLIMIT_AS) and instead bound the JVM heap with ``-Xmx``.
     """
-    if resource is None:  # pragma: no cover - non-POSIX
+    if os.name != "posix":  # pragma: no cover - non-POSIX
         return None
 
     cpu = max(1, cpu_seconds)
 
     def _apply():  # pragma: no cover - runs in the child process
-        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 1))
-        if mem_bytes:
-            try:
-                resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
-            except (ValueError, OSError):
-                pass
+        os.setsid()  # own session/process group -> killable as a unit on timeout
+        if resource is not None:
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 1))
+            if mem_bytes:
+                try:
+                    resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+                except (ValueError, OSError):
+                    pass
 
     return _apply
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 
 def _run(
@@ -95,19 +109,24 @@ def _run(
     env: Optional[dict] = None,
 ) -> subprocess.CompletedProcess:
     preexec = _preexec(cpu_seconds, mem_bytes) if os.name == "posix" else None
-    run_env = None
-    if env:
-        run_env = {**os.environ, **env}
-    return subprocess.run(
-        cmd,
-        cwd=str(cwd),
-        input=input_text,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        preexec_fn=preexec,
-        env=run_env,
+    run_env = {**os.environ, **env} if env else None
+    proc = subprocess.Popen(
+        cmd, cwd=str(cwd),
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, preexec_fn=preexec, env=run_env,
     )
+    try:
+        out, err = proc.communicate(input=input_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Kill the whole process group so orphaned children can't keep the
+        # stdout pipe open and hang communicate() forever.
+        _kill_group(proc)
+        try:
+            proc.communicate(timeout=5)
+        except Exception:  # pragma: no cover - defensive
+            pass
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 def _truncate(text: str, limit: int) -> str:

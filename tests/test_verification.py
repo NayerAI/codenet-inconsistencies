@@ -157,3 +157,30 @@ def test_python2_fallback_runs_py2_only_snippet():
     assert res.clean
     assert res.interpreter == "python2"     # python3 failed, python2 rescued it
     assert res.stdout.strip() == "hi"
+
+
+# --- timeout / process-group robustness ------------------------------------
+def test_infinite_loop_program_times_out_bounded():
+    import time
+    cfg = VerificationConfig(run_timeout_seconds=2, compile_timeout_seconds=15)
+    src = "import time\nwhile True:\n    time.sleep(1)\n"   # no CPU -> wall-clock timeout
+    t = time.time()
+    res = run_program("Python", src, ".py", "", cfg)
+    assert res.timed_out
+    assert time.time() - t < 15
+
+
+def test_forking_child_does_not_hang_timeout():
+    # Parent forks a child that keeps the stdout pipe open and both hang. Without
+    # killing the whole process group, communicate() would block ~60s.
+    import time
+    cfg = VerificationConfig(run_timeout_seconds=2, compile_timeout_seconds=15)
+    src = ("import os, time\n"
+           "if os.fork() == 0:\n"
+           "    time.sleep(60)\n"      # child holds the inherited stdout
+           "else:\n"
+           "    time.sleep(60)\n")     # parent hangs too
+    t = time.time()
+    res = run_program("Python", src, ".py", "", cfg)
+    assert res.timed_out
+    assert time.time() - t < 15, "process-group kill should reap the child quickly"

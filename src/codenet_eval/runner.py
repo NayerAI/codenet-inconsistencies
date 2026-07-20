@@ -410,6 +410,7 @@ class Runner:
             row["prompt_chars"] = sum(len(m["content"]) for m in messages)
             return row
 
+        log.info("%s %s/%s -> querying LLM ...", pid, lang_a, lang_b)
         try:
             response = client.complete(messages)
         except LLMError as exc:
