@@ -12,12 +12,40 @@ from .utils import get_logger, read_jsonl
 log = get_logger(__name__)
 
 
-def summarise(run_dir: Path) -> dict:
+def _load_scoped(run_dir: Path, key_fields: tuple[str, ...], manifest_keys) -> list[dict]:
+    """Load real (non-dry) result rows, de-duplicated by their key (last wins),
+    and scoped to the current manifest so a reused run directory doesn't mix in
+    results from earlier configs. Falls back to all rows if there's no manifest."""
     results_path = run_dir / RESULTS_NAME
     if not results_path.is_file():
         raise FileNotFoundError(f"No results found at {results_path}")
+    by_key: dict[tuple, dict] = {}
+    for r in read_jsonl(results_path):
+        if r.get("dry_run"):
+            continue  # dry-run previews are not real requests
+        if not set(key_fields) <= r.keys():
+            continue
+        by_key[tuple(r[f] for f in key_fields)] = r
+    if manifest_keys is not None:
+        return [row for k, row in by_key.items() if k in manifest_keys]
+    return list(by_key.values())
 
-    rows = list(read_jsonl(results_path))
+
+def _manifest_pair_keys(run_dir: Path):
+    manifest_path = run_dir / "manifest.jsonl"
+    if not manifest_path.is_file():
+        return None
+    keys = set()
+    for row in read_jsonl(manifest_path):
+        for pair in row.get("pairs", []):
+            keys.add((row["problem_id"], pair[0], pair[1]))
+    return keys
+
+
+def summarise(run_dir: Path) -> dict:
+    rows = _load_scoped(
+        run_dir, ("problem_id", "language_a", "language_b"), _manifest_pair_keys(run_dir)
+    )
     total = len(rows)
     llm_errors = sum(1 for r in rows if r.get("llm_error"))
     parse_errors = sum(1 for r in rows if r.get("parse_error"))
@@ -80,11 +108,19 @@ def summarise(run_dir: Path) -> dict:
     return summary
 
 
+def _manifest_unit_keys(run_dir: Path):
+    manifest_path = run_dir / "manifest.jsonl"
+    if not manifest_path.is_file():
+        return None
+    return {(r["problem_id"], r["source_language"], r["target_language"])
+            for r in read_jsonl(manifest_path)}
+
+
 def summarise_transpilation(run_dir: Path) -> dict:
-    results_path = run_dir / RESULTS_NAME
-    if not results_path.is_file():
-        raise FileNotFoundError(f"No results found at {results_path}")
-    rows = list(read_jsonl(results_path))
+    rows = _load_scoped(
+        run_dir, ("problem_id", "source_language", "target_language"),
+        _manifest_unit_keys(run_dir),
+    )
     total = len(rows)
     llm_errors = sum(1 for r in rows if r.get("llm_error"))
     evaluated = [r for r in rows if r.get("category")]
