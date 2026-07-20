@@ -23,9 +23,9 @@ def _prog(returncode, stdout):
     }
 
 
-def _row(ra, rb, out_a, out_b):
+def _row(ra, rb, out_a, out_b, pid="p1"):
     return {
-        "problem_id": "p1",
+        "problem_id": pid,
         "language_a": "C",
         "language_b": "Python",
         "kind": "program",
@@ -44,11 +44,11 @@ def _row(ra, rb, out_a, out_b):
 def test_reverify_reclassify_only(tmp_path):
     run_dir = tmp_path / "results" / "r"
     run_dir.mkdir(parents=True)
-    rows = [
-        _row(0, 1, "3", ""),    # B crashed (exit 1) -> must become inconclusive
-        _row(0, 0, "3", "4"),   # both clean, both non-empty, differ -> strong
-        _row(0, 0, "3", ""),    # both clean but B empty -> confirmed weak
-        _row(0, 0, "5", "5"),   # both clean, equal -> refuted
+    rows = [   # distinct problem ids -> distinct pair keys (as in a real run)
+        _row(0, 1, "3", "", pid="p1"),    # B crashed (exit 1) -> inconclusive
+        _row(0, 0, "3", "4", pid="p2"),   # both clean, both non-empty, differ -> strong
+        _row(0, 0, "3", "", pid="p3"),    # both clean but B empty -> confirmed weak
+        _row(0, 0, "5", "5", pid="p4"),   # both clean, equal -> refuted
     ]
     write_jsonl(run_dir / "results.jsonl", rows)
 
