@@ -23,3 +23,13 @@ def test_different_seed_changes_selection():
     a = select_problem_ids(ids, percent=10, seed=1)
     b = select_problem_ids(ids, percent=10, seed=2)
     assert a != b
+
+
+def test_smaller_fraction_is_subset_of_larger():
+    # The seed must not depend on the fraction: 0.1% ⊂ 1% ⊂ 5%.
+    ids = [f"p{n:05d}" for n in range(2429)]
+    s01 = set(select_problem_ids(ids, percent=0.1, seed=42))
+    s1 = set(select_problem_ids(ids, percent=1.0, seed=42))
+    s5 = set(select_problem_ids(ids, percent=5.0, seed=42))
+    assert s01 <= s1 <= s5
+    assert len(s01) < len(s1) < len(s5)

@@ -70,12 +70,19 @@ class DatasetConfig:
 @dataclass
 class SamplingConfig:
     # Percentage of *eligible* problems to sample (0-100). Default 1%.
+    # Sampling is a seeded shuffle of the (fixed) eligible set from which we take
+    # the first N -- so the seed does NOT depend on the percentage and a smaller
+    # fraction is always a subset of a larger one (0.1% ⊂ 1% ⊂ 5%).
     percent: float = 1.0
     seed: int = 42
     # Hard cap on the number of sampled problems (applied after the percentage).
     max_samples: Optional[int] = None
     # Only consider "Accepted" submissions as representatives.
     require_accepted: bool = True
+    # Cache the (expensive) eligibility scan so re-sampling is fast. Invalidated
+    # automatically when languages / dataset / require_accepted change; force a
+    # rescan with 'sample --rescan' or by deleting data/.eligibility_cache/.
+    cache_eligibility: bool = True
 
 
 @dataclass

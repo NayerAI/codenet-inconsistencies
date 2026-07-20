@@ -52,10 +52,12 @@ def _summarise(cfg: Config, run_dir: Path) -> tuple[dict, str]:
     return s, format_summary(s)
 
 
-def _print_dry_run(n_samples: int, n_calls: int) -> None:
+def _print_dry_run(n_samples: int, total: int, remaining: int) -> None:
     print("==================== DRY RUN (no LLM calls) ====================")
-    print(f"sampled units/problems : {n_samples}")
-    print(f"planned LLM calls      : {n_calls}")
+    print(f"sampled units/problems   : {n_samples}")
+    print(f"planned LLM calls (total): {total}")
+    print(f"already completed        : {total - remaining}")
+    print(f"remaining LLM calls      : {remaining}")
     print("===============================================================")
 
 log = get_logger("codenet_eval.cli")
@@ -244,7 +246,7 @@ def cmd_sample(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
     runner = _make_runner(cfg)
     run_dir = _resolve_run_dir(cfg, args.run_name, create=True)
-    runner.sample(run_dir)
+    runner.sample(run_dir, rescan=args.rescan)
     print(f"Manifest written to {run_dir / 'manifest.jsonl'}")
     return 0
 
@@ -269,9 +271,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     # reflects the CURRENT config), or if there is no manifest yet.
     if args.sample or args.dry_run or not (run_dir / "manifest.jsonl").is_file():
         log.info("Sampling for run %s", run_dir.name)
-        runner.sample(run_dir)
+        runner.sample(run_dir, rescan=args.rescan)
     if args.dry_run:
-        _print_dry_run(*runner.dry_run(run_dir))
+        _print_dry_run(*runner.dry_run(run_dir, resume=not args.no_resume))
         return 0
     runner.evaluate(
         run_dir, _make_client(cfg), limit=args.limit, resume=not args.no_resume, workers=args.workers
@@ -313,9 +315,9 @@ def cmd_all(args: argparse.Namespace) -> int:
     _maybe_cleanup_archive(cfg, args)
     runner = _make_runner(cfg)
     run_dir = _resolve_run_dir(cfg, args.run_name, create=True)
-    runner.sample(run_dir)
+    runner.sample(run_dir, rescan=args.rescan)
     if args.dry_run:
-        _print_dry_run(*runner.dry_run(run_dir))
+        _print_dry_run(*runner.dry_run(run_dir, resume=not args.no_resume))
         return 0
     runner.evaluate(
         run_dir, _make_client(cfg), limit=args.limit, resume=not args.no_resume, workers=args.workers
@@ -365,6 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sample = sub.add_parser("sample", help="Sample X%% of eligible problems.")
     p_sample.add_argument("--run-name", default=None)
+    p_sample.add_argument("--rescan", action="store_true", help="Ignore the eligibility cache and rescan.")
     p_sample.set_defaults(func=cmd_sample)
 
     p_run = sub.add_parser("run", help="Query the LLM for each sampled language pair.")
@@ -373,6 +376,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--dry-run", action="store_true", help="Build prompts but do not call the API.")
     p_run.add_argument("--no-resume", action="store_true", help="Ignore existing results.jsonl.")
     p_run.add_argument("--sample", action="store_true", help="Force (re)sampling before running.")
+    p_run.add_argument("--rescan", action="store_true", help="Ignore the eligibility cache and rescan.")
     p_run.add_argument("--workers", type=int, default=None, help="Parallel workers (overrides execution.workers).")
     p_run.set_defaults(func=cmd_run)
 
@@ -398,6 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--no-resume", action="store_true")
     p_all.add_argument("--workers", type=int, default=None, help="Parallel workers (overrides execution.workers).")
     p_all.add_argument("--no-keep-archive", action="store_true")
+    p_all.add_argument("--rescan", action="store_true", help="Ignore the eligibility cache and rescan.")
     p_all.add_argument(
         "--offline", action="store_true",
         help="Do not access the network; use an archive already in data/.",

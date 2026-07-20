@@ -86,15 +86,28 @@ Two experiment types, selected by `experiment.type`:
   codenet-eval -c config/config.yaml run   # experiment.type: transpilation, dataset.type: humaneval_x
   ```
 
-**Dry run** — preview any experiment without calling the LLM (counts samples and
-planned LLM calls), to check everything works and estimate cost:
+**Dry run** — preview any experiment without calling the LLM, to check everything
+works and estimate cost. It re-samples for the current config and reports the
+planned calls **minus what a prior real run already completed** (respecting
+`--no-resume`); it writes nothing:
 
 ```bash
 codenet-eval -c config/config.yaml run --dry-run
 # ==================== DRY RUN (no LLM calls) ====================
-# sampled units/problems : 45
-# planned LLM calls      : 45
+# sampled units/problems   : 8
+# planned LLM calls (total): 24
+# already completed        : 24
+# remaining LLM calls      : 0
 ```
+
+**Reproducible, nested sampling** — the seed does *not* depend on the fraction,
+so a smaller sample is always a subset of a larger one (`0.1% ⊂ 1% ⊂ 5%`).
+
+**Eligibility cache** — the (slow, minutes-long for CodeNet) scan for problems
+solved in all selected languages is cached under `data/.eligibility_cache/`, so
+re-sampling at a different percentage is instant. The cache is keyed by dataset +
+languages + `require_accepted` and refreshes automatically when those change;
+force a rescan with `--rescan`.
 
 ---
 

@@ -13,6 +13,8 @@ and resumable:
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
+import json
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -23,7 +25,7 @@ from .config import Config
 from .llm import LLMError, OpenRouterClient
 from .pairing import language_pairs
 from .prompts import build_messages
-from .providers import ProblemSample, get_provider
+from .providers import ProblemSample, SourceUnit, get_provider
 from .sampling import select_problem_ids
 from .utils import append_jsonl, get_logger, read_jsonl, read_text_best_effort, write_jsonl
 from .verification import reclassify_verification, verify_divergence, verify_function_divergence
@@ -43,27 +45,30 @@ def default_run_name() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("run-%Y%m%d-%H%M%S")
 
 
+def _sample_from_cache(pid: str, units: dict) -> ProblemSample:
+    return ProblemSample(
+        problem_id=pid,
+        units={
+            lang: SourceUnit(language=u["language"], path=Path(u["path"]),
+                             ext=u["filename_ext"], kind=u["kind"], unit_id=u["submission_id"])
+            for lang, u in units.items()
+        },
+    )
+
+
 class Runner:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.provider = get_provider(cfg)
 
     # --- stage 1: sampling ---------------------------------------------------
-    def sample(self, run_dir: Path) -> list[dict]:
+    def sample(self, run_dir: Path, rescan: bool = False) -> list[dict]:
         if not self.provider.is_ready():
             raise FileNotFoundError(
                 f"Dataset '{self.cfg.dataset.type}' not prepared. Run 'download' first."
             )
         languages = self.cfg.languages
-        log.info(
-            "Scanning %s problems eligible for languages: %s",
-            self.cfg.dataset.type,
-            ", ".join(languages),
-        )
-
-        eligible: dict[str, ProblemSample] = {
-            s.problem_id: s for s in self.provider.iter_eligible(languages)
-        }
+        eligible = self._eligible_map(rescan=rescan)
         log.info("Found %d eligible problems", len(eligible))
         if not eligible:
             avail = ", ".join(self.provider.available_languages())
@@ -124,6 +129,57 @@ class Runner:
         )
         return rows
 
+    # --- eligibility (with on-disk cache) ------------------------------------
+    def _eligibility_key(self) -> str:
+        return json.dumps({
+            "dataset": self.cfg.dataset.type,
+            "languages": sorted(self.cfg.languages),
+            "require_accepted": self.cfg.sampling.require_accepted,
+            "root": str(self.cfg.dataset_root),
+        }, sort_keys=True)
+
+    def _eligibility_cache_path(self) -> Path:
+        digest = hashlib.sha1(self._eligibility_key().encode()).hexdigest()[:16]
+        return self.cfg.data_path / ".eligibility_cache" / f"{self.cfg.dataset.type}-{digest}.json"
+
+    def _eligible_map(self, rescan: bool = False) -> dict[str, ProblemSample]:
+        languages = self.cfg.languages
+        cache_path = self._eligibility_cache_path()
+        if self.cfg.sampling.cache_eligibility and not rescan and cache_path.is_file():
+            try:
+                data = json.loads(cache_path.read_text(encoding="utf-8"))
+                if data.get("key") == self._eligibility_key():
+                    log.info("Using cached eligibility: %d problems (%s)",
+                             len(data["problems"]), cache_path)
+                    return {pid: _sample_from_cache(pid, units)
+                            for pid, units in data["problems"].items()}
+                log.info("Eligibility cache stale (config changed); rescanning")
+            except (ValueError, KeyError) as exc:
+                log.warning("Ignoring unreadable eligibility cache: %s", exc)
+
+        log.info("Scanning %s problems eligible for languages: %s",
+                 self.cfg.dataset.type, ", ".join(languages))
+        eligible = {s.problem_id: s for s in self.provider.iter_eligible(languages)}
+        if self.cfg.sampling.cache_eligibility:
+            self._write_eligibility_cache(cache_path, eligible)
+        return eligible
+
+    def _write_eligibility_cache(self, cache_path: Path, eligible: dict) -> None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "key": self._eligibility_key(),
+            "problems": {
+                pid: {lang: {"submission_id": u.unit_id, "language": u.language,
+                             "filename_ext": u.ext, "kind": u.kind, "path": str(u.path)}
+                      for lang, u in s.units.items()}
+                for pid, s in eligible.items()
+            },
+        }
+        tmp = cache_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(cache_path)
+        log.info("Cached eligibility for %d problems at %s", len(eligible), cache_path)
+
     def load_manifest(self, run_dir: Path) -> list[dict]:
         manifest_path = run_dir / MANIFEST_NAME
         if not manifest_path.is_file():
@@ -146,15 +202,20 @@ class Runner:
             keys.add(_pair_key(row["problem_id"], row["language_a"], row["language_b"]))
         return keys
 
-    def dry_run(self, run_dir: Path) -> tuple[int, int]:
-        """Count sampled problems and planned LLM calls for the current manifest,
-        building each prompt as a sanity check. Writes nothing; ignores results."""
+    def dry_run(self, run_dir: Path, resume: bool = True) -> tuple[int, int, int]:
+        """Count sampled problems, total planned LLM calls, and calls REMAINING
+        after resume (subtracting pairs a prior real run already completed).
+        Builds each pending prompt as a sanity check; writes nothing."""
         manifest = self.load_manifest(run_dir)
-        calls = 0
+        done = self._existing_keys(run_dir / RESULTS_NAME) if resume else set()
+        total = remaining = 0
         for mrow, lang_a, lang_b in self._iter_pairs(manifest):
-            self._evaluate_pair(mrow, lang_a, lang_b, client=None)  # builds messages
-            calls += 1
-        return len(manifest), calls
+            total += 1
+            if _pair_key(mrow["problem_id"], lang_a, lang_b) in done:
+                continue
+            remaining += 1
+            self._evaluate_pair(mrow, lang_a, lang_b, client=None)  # sanity build
+        return len(manifest), total, remaining
 
     def evaluate(
         self,

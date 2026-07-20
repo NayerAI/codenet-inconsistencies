@@ -43,6 +43,26 @@ class FakeClient:
         return LLMResponse(raw_content="{}", parsed=parsed, model="fake", usage={"total_tokens": 5})
 
 
+def test_eligibility_cache_is_written_and_reused(mini_config, tmp_path):
+    runner = Runner(mini_config)
+    runner.sample(tmp_path / "run1")            # scans, writes the cache
+    cache_dir = mini_config.data_path / ".eligibility_cache"
+    assert list(cache_dir.glob("*.json")), "cache file created"
+
+    # A second runner must reuse the cache and NOT rescan.
+    r2 = Runner(mini_config)
+
+    def boom(*a, **k):
+        raise AssertionError("iter_eligible should not be called (cache hit)")
+
+    r2.provider.iter_eligible = boom
+    rows = r2.sample(tmp_path / "run2")
+    assert len(rows) == 2                        # reconstructed from cache
+
+    with pytest.raises(AssertionError):          # --rescan bypasses the cache
+        r2.sample(tmp_path / "run3", rescan=True)
+
+
 def test_sample_writes_manifest(mini_config, tmp_path):
     runner = Runner(mini_config)
     run_dir = tmp_path / "run"
@@ -67,11 +87,26 @@ def test_dry_run_counts_from_manifest_and_writes_nothing(mini_config, tmp_path):
     runner = Runner(mini_config)
     run_dir = tmp_path / "run"
     runner.sample(run_dir)                      # 2 problems x 2 reference pairs
-    n_samples, n_calls = runner.dry_run(run_dir)
-    assert n_samples == 2
-    assert n_calls == 4
+    n_samples, total, remaining = runner.dry_run(run_dir)
+    assert (n_samples, total, remaining) == (2, 4, 4)
     # dry_run must not create/pollute results.jsonl (would block a later real run).
     assert not (run_dir / "results.jsonl").exists()
+
+
+def test_dry_run_subtracts_completed_real_run(mini_config, tmp_path):
+    # A prior REAL run should make dry-run report fewer remaining calls.
+    runner = Runner(mini_config)
+    run_dir = tmp_path / "run"
+    runner.sample(run_dir)
+
+    class Stub:
+        def complete(self, messages):
+            return LLMResponse(raw_content="{}", parsed={"inconsistent": False, "divergence_input": None}, model="s", usage={})
+
+    runner.evaluate(run_dir, Stub())            # completes all 4 pairs for real
+    n_samples, total, remaining = runner.dry_run(run_dir, resume=True)
+    assert (total, remaining) == (4, 0)         # nothing left to do
+    assert runner.dry_run(run_dir, resume=False)[2] == 4  # --no-resume ignores it
 
 
 def test_resume_ignores_dry_run_rows(mini_config, tmp_path):

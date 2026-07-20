@@ -53,9 +53,12 @@ dataset:
 
 sampling:
   percent: 1.0            # X% of eligible problems (default 1%)
-  seed: 42                # reproducible sampling
+  seed: 42                # reproducible; seed is independent of percent, so a
+                          # smaller fraction is always a subset of a larger one
   max_samples: null       # optional hard cap on number of problems
   require_accepted: true  # only use "Accepted" submissions as representatives
+  cache_eligibility: true # cache the eligibility scan (data/.eligibility_cache/);
+                          # force a rescan with 'sample --rescan'
 
 pairing:
   # "reference": compare reference_language vs every other language (n-1 pairs;

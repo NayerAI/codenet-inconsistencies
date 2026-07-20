@@ -53,7 +53,8 @@ class TranspilationRunner:
         self.provider = get_provider(cfg)
 
     # --- stage 1: sampling ---------------------------------------------------
-    def sample(self, run_dir: Path) -> list[dict]:
+    def sample(self, run_dir: Path, rescan: bool = False) -> list[dict]:
+        # (HumanEval-X is small; the eligibility cache is only used for CodeNet.)
         if not self.provider.is_ready():
             raise FileNotFoundError("HumanEval-X not prepared. Run 'download' first.")
         records = self.provider.load_records()
@@ -105,15 +106,22 @@ class TranspilationRunner:
         log.info("Wrote manifest with %d units -> %d LLM calls", len(rows), len(rows))
         return rows
 
-    def dry_run(self, run_dir: Path) -> tuple[int, int]:
-        """Count sampled units and planned LLM calls (one per unit); build each
-        prompt as a sanity check. Writes nothing; ignores results."""
+    def dry_run(self, run_dir: Path, resume: bool = True) -> tuple[int, int, int]:
+        """Count sampled units, total planned LLM calls (one per unit), and calls
+        REMAINING after resume; build each pending prompt as a sanity check.
+        Writes nothing."""
         manifest = list(read_jsonl(run_dir / MANIFEST_NAME))
+        done = _done_keys(run_dir / RESULTS_NAME) if resume else set()
+        total = remaining = 0
         for u in manifest:
+            total += 1
+            if f"{u['problem_id']}|{u['source_language']}|{u['target_language']}" in done:
+                continue
+            remaining += 1
             build_transpile_messages(
                 u["source_language"], u["source_code"],
                 u["target_language"], u["target_declaration"])
-        return len(manifest), len(manifest)
+        return len(manifest), total, remaining
 
     # --- stage 2: evaluation -------------------------------------------------
     def evaluate(
