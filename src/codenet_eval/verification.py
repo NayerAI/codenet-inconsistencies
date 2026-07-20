@@ -17,7 +17,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -163,29 +163,144 @@ def run_program(
     input_text: str,
     cfg: VerificationConfig,
 ) -> RunResult:
+    """Compile (if needed) and run a program once on ``input_text``.
+
+    Thin convenience wrapper around :func:`prepare_program`. When you need to run
+    the *same* program on many inputs, prepare it once and call
+    :meth:`Program.run` per input so compilation happens only once.
+    """
+    prog = prepare_program(language, source, filename_ext, cfg)
+    try:
+        return prog.run(input_text)
+    finally:
+        prog.close()
+
+
+@dataclass
+class Program:
+    """A compiled/prepared program that can be executed on many inputs.
+
+    Build it with :func:`prepare_program` (which compiles C/C++/Java/Go exactly
+    once), then call :meth:`run` per input. Call :meth:`close` -- or use it as a
+    context manager -- to remove its temp directory.
+
+    If preparation failed (missing toolchain, unsupported language, compile
+    error), ``error_result`` holds the verdict and every :meth:`run` returns a
+    copy of it, mirroring the old per-input ``run_program`` behaviour.
+    """
+
+    language: str
+    cfg: VerificationConfig
+    kind: Optional[str] = None
+    _tmp: Optional[tempfile.TemporaryDirectory] = None
+    tmpdir: Optional[Path] = None
+    run_cmd: Optional[list] = None
+    env: Optional[dict] = None
+    mem_bytes: int = 0
+    run_error: Optional[str] = None            # error text when a run exits != 0
+    python_bins: Optional[list] = None
+    src_path: Optional[Path] = None
+    error_result: Optional[RunResult] = None   # set if prepare failed
+
+    # -- lifecycle -----------------------------------------------------------
+    def close(self) -> None:
+        if self._tmp is not None:
+            self._tmp.cleanup()
+            self._tmp = None
+
+    def __enter__(self) -> "Program":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    # -- execution -----------------------------------------------------------
+    def run(self, input_text: str) -> RunResult:
+        if self.error_result is not None:
+            return replace(self.error_result)   # same verdict for every input
+        try:
+            if self.kind == "python":
+                return self._run_python(input_text)
+            return self._run_cmd(input_text)
+        except subprocess.TimeoutExpired:
+            return RunResult(self.language, True, True, True, None, "", "", True, "timed out")
+        except Exception as exc:  # pragma: no cover - defensive
+            return RunResult(self.language, True, False, False, None, "", "", False,
+                             f"exec error: {exc}")
+
+    def _run_python(self, input_text: str) -> RunResult:
+        cfg = self.cfg
+        last: Optional[RunResult] = None
+        for interpreter in self.python_bins or []:
+            proc = _run(
+                [interpreter, str(self.src_path)], self.tmpdir, input_text,
+                cfg.run_timeout_seconds, cfg.run_timeout_seconds, self.mem_bytes,
+            )
+            res = RunResult(
+                self.language, True, True, True, proc.returncode,
+                _truncate(proc.stdout, cfg.max_output_bytes),
+                _truncate(proc.stderr, cfg.max_output_bytes), False,
+                None if proc.returncode == 0 else f"{interpreter} exited {proc.returncode}",
+                interpreter=interpreter,
+            )
+            if proc.returncode == 0:
+                return res              # first interpreter that runs cleanly wins
+            last = res
+        return last  # type: ignore[return-value]  # python_bins is non-empty here
+
+    def _run_cmd(self, input_text: str) -> RunResult:
+        cfg = self.cfg
+        proc = _run(
+            self.run_cmd, self.tmpdir, input_text,
+            cfg.run_timeout_seconds, cfg.run_timeout_seconds, self.mem_bytes, env=self.env,
+        )
+        ok = proc.returncode == 0
+        return RunResult(
+            self.language, True, True, True, proc.returncode,
+            _truncate(proc.stdout, cfg.max_output_bytes),
+            _truncate(proc.stderr, cfg.max_output_bytes), False,
+            None if ok else (self.run_error or f"exited {proc.returncode}"),
+        )
+
+
+def prepare_program(
+    language: str,
+    source: str,
+    filename_ext: str,
+    cfg: VerificationConfig,
+) -> Program:
+    """Compile/prepare a program once so it can be run on many inputs.
+
+    Missing toolchains, unsupported languages and compile errors do not raise:
+    they are captured in the returned :class:`Program`'s ``error_result`` and
+    surfaced from every :meth:`Program.run` call.
+    """
     kind = _LANG_KIND.get(language)
     if kind is None:
-        return RunResult(language, False, False, False, None, "", "", False, "unsupported language")
-
-    with tempfile.TemporaryDirectory(prefix="codenet_verify_") as tmp:
-        tmpdir = Path(tmp)
-        try:
-            if kind == "python":
-                return _run_python(tmpdir, source, filename_ext, input_text, cfg, language)
-            if kind in ("c", "cpp"):
-                return _run_compiled_c(tmpdir, kind, source, filename_ext, input_text, cfg, language)
-            if kind == "java":
-                return _run_java(tmpdir, source, input_text, cfg, language)
-            if kind == "go":
-                return _run_go(tmpdir, source, input_text, cfg, language)
-            if kind == "js":
-                return _run_js(tmpdir, source, input_text, cfg, language)
-        except subprocess.TimeoutExpired:
-            return RunResult(language, True, True, True, None, "", "", True, "timed out")
-        except Exception as exc:  # pragma: no cover - defensive
-            return RunResult(language, True, False, False, None, "", "", False, f"exec error: {exc}")
-    # Unreachable, keeps type checkers happy.
-    return RunResult(language, False, False, False, None, "", "", False, "unreachable")
+        return Program(
+            language, cfg,
+            error_result=RunResult(language, False, False, False, None, "", "", False,
+                                   "unsupported language"),
+        )
+    tmp = tempfile.TemporaryDirectory(prefix="codenet_verify_")
+    prog = Program(language, cfg, kind=kind, _tmp=tmp, tmpdir=Path(tmp.name))
+    try:
+        if kind == "python":
+            _prepare_python(prog, source, filename_ext)
+        elif kind in ("c", "cpp"):
+            _prepare_compiled_c(prog, kind, source, filename_ext)
+        elif kind == "java":
+            _prepare_java(prog, source)
+        elif kind == "go":
+            _prepare_go(prog, source)
+        elif kind == "js":
+            _prepare_js(prog, source)
+    except subprocess.TimeoutExpired:
+        prog.error_result = RunResult(language, True, False, False, None, "", "", True, "timed out")
+    except Exception as exc:  # pragma: no cover - defensive
+        prog.error_result = RunResult(language, True, False, False, None, "", "", False,
+                                      f"prepare error: {exc}")
+    return prog
 
 
 def _mem_bytes(cfg: VerificationConfig) -> int:
@@ -199,130 +314,114 @@ def _python_bins(cfg) -> list:
     return [b for b in bins if shutil.which(b) is not None]
 
 
-def _run_python(tmpdir, source, ext, input_text, cfg, language) -> RunResult:
+def _prepare_python(prog: Program, source: str, ext: str) -> None:
+    cfg = prog.cfg
     bins = _python_bins(cfg)
     if not bins:
-        return RunResult(language, True, False, False, None, "", "", False, "python not available")
-    src = tmpdir / f"main{ext or '.py'}"
+        prog.error_result = RunResult(prog.language, True, False, False, None, "", "", False,
+                                      "python not available")
+        return
+    src = prog.tmpdir / f"main{ext or '.py'}"
     src.write_text(source, encoding="utf-8")
-
-    last: Optional[RunResult] = None
-    for interpreter in bins:
-        proc = _run(
-            [interpreter, str(src)], tmpdir, input_text,
-            cfg.run_timeout_seconds, cfg.run_timeout_seconds, _mem_bytes(cfg),
-        )
-        res = RunResult(
-            language, True, True, True, proc.returncode,
-            _truncate(proc.stdout, cfg.max_output_bytes),
-            _truncate(proc.stderr, cfg.max_output_bytes), False,
-            None if proc.returncode == 0 else f"{interpreter} exited {proc.returncode}",
-            interpreter=interpreter,
-        )
-        if proc.returncode == 0:
-            return res            # first interpreter that runs cleanly wins
-        last = res
-    return last  # none ran cleanly; report the last attempt (marked unclean)
+    prog.src_path = src
+    prog.python_bins = bins          # try each; first clean run (exit 0) wins
+    prog.mem_bytes = _mem_bytes(cfg)
 
 
-def _run_compiled_c(tmpdir, kind, source, ext, input_text, cfg, language) -> RunResult:
+def _prepare_compiled_c(prog: Program, kind: str, source: str, ext: str) -> None:
+    cfg = prog.cfg
     compiler = cfg.gcc_bin if kind == "c" else cfg.gpp_bin
     if shutil.which(compiler) is None:
-        return RunResult(language, True, False, False, None, "", "", False, f"{compiler} not available")
-    src = tmpdir / f"main{ext or ('.c' if kind == 'c' else '.cpp')}"
+        prog.error_result = RunResult(prog.language, True, False, False, None, "", "", False,
+                                      f"{compiler} not available")
+        return
+    src = prog.tmpdir / f"main{ext or ('.c' if kind == 'c' else '.cpp')}"
     src.write_text(source, encoding="utf-8")
-    exe = tmpdir / "prog"
+    exe = prog.tmpdir / "prog"
     compile_cmd = [compiler, "-O2", "-w", "-o", str(exe), str(src)]
     if kind == "c":
         compile_cmd.append("-lm")
-    # No address-space cap during compilation (the compiler needs headroom).
-    comp = _run(compile_cmd, tmpdir, "", cfg.compile_timeout_seconds, cfg.compile_timeout_seconds, 0)
+    # Compile ONCE here (no address-space cap; the compiler needs headroom).
+    comp = _run(compile_cmd, prog.tmpdir, "", cfg.compile_timeout_seconds,
+                cfg.compile_timeout_seconds, 0)
     if comp.returncode != 0:
-        return RunResult(
-            language, True, False, False, comp.returncode, "",
-            _truncate(comp.stderr, cfg.max_output_bytes), False, "compilation failed",
-        )
-    proc = _run(
-        [str(exe)], tmpdir, input_text,
-        cfg.run_timeout_seconds, cfg.run_timeout_seconds, _mem_bytes(cfg),
-    )
-    return RunResult(
-        language, True, True, True, proc.returncode,
-        _truncate(proc.stdout, cfg.max_output_bytes),
-        _truncate(proc.stderr, cfg.max_output_bytes), False, None,
-    )
+        prog.error_result = RunResult(prog.language, True, False, False, comp.returncode, "",
+                                      _truncate(comp.stderr, cfg.max_output_bytes), False,
+                                      "compilation failed")
+        return
+    prog.run_cmd = [str(exe)]
+    prog.mem_bytes = _mem_bytes(cfg)
 
 
-def _run_java(tmpdir, source, input_text, cfg, language) -> RunResult:
+def _prepare_java(prog: Program, source: str) -> None:
+    cfg = prog.cfg
     if shutil.which(cfg.javac_bin) is None or shutil.which(cfg.java_bin) is None:
-        return RunResult(language, True, False, False, None, "", "", False, "java toolchain not available")
+        prog.error_result = RunResult(prog.language, True, False, False, None, "", "", False,
+                                      "java toolchain not available")
+        return
     main_class = detect_java_main_class(source) or "Main"
-    src = tmpdir / f"{main_class}.java"
+    src = prog.tmpdir / f"{main_class}.java"
     src.write_text(source, encoding="utf-8")
-    comp = _run(
-        [cfg.javac_bin, str(src)], tmpdir, "",
-        cfg.compile_timeout_seconds, cfg.compile_timeout_seconds, 0,
-    )
+    comp = _run([cfg.javac_bin, str(src)], prog.tmpdir, "",
+                cfg.compile_timeout_seconds, cfg.compile_timeout_seconds, 0)
     if comp.returncode != 0:
-        return RunResult(
-            language, True, False, False, comp.returncode, "",
-            _truncate(comp.stderr, cfg.max_output_bytes), False, "compilation failed",
-        )
+        prog.error_result = RunResult(prog.language, True, False, False, comp.returncode, "",
+                                      _truncate(comp.stderr, cfg.max_output_bytes), False,
+                                      "compilation failed")
+        return
     # Bound the JVM heap with -Xmx instead of RLIMIT_AS (mem_bytes=0), since the
     # JVM reserves far more virtual address space than it commits.
     java_cmd = [cfg.java_bin]
     if cfg.memory_limit_mb > 0:
         java_cmd.append(f"-Xmx{cfg.memory_limit_mb}m")
-    java_cmd += ["-cp", str(tmpdir), main_class]
-    proc = _run(java_cmd, tmpdir, input_text, cfg.run_timeout_seconds, cfg.run_timeout_seconds, 0)
-    return RunResult(
-        language, True, True, True, proc.returncode,
-        _truncate(proc.stdout, cfg.max_output_bytes),
-        _truncate(proc.stderr, cfg.max_output_bytes), False, None,
-    )
+    java_cmd += ["-cp", str(prog.tmpdir), main_class]
+    prog.run_cmd = java_cmd
+    prog.mem_bytes = 0
 
 
-def _run_go(tmpdir, source, input_text, cfg, language) -> RunResult:
+def _prepare_go(prog: Program, source: str) -> None:
+    cfg = prog.cfg
     if shutil.which(cfg.go_bin) is None:
-        return RunResult(language, True, False, False, None, "", "", False, "go not available")
-    src = tmpdir / "main.go"
+        prog.error_result = RunResult(prog.language, True, False, False, None, "", "", False,
+                                      "go not available")
+        return
+    src = prog.tmpdir / "main.go"
     src.write_text(source, encoding="utf-8")
-    # Run in GOPATH mode with caches inside the temp dir so a single stdlib-only
-    # file runs fully offline.
+    exe = prog.tmpdir / "prog"
+    # Build ONCE in GOPATH mode with caches inside the temp dir so a single
+    # stdlib-only file builds fully offline; the native binary is then run per
+    # input (much cheaper than 'go run', which recompiles every time).
     env = {
         "GO111MODULE": "off",
-        "GOCACHE": str(tmpdir / ".gocache"),
-        "GOPATH": str(tmpdir / ".gopath"),
+        "GOCACHE": str(prog.tmpdir / ".gocache"),
+        "GOPATH": str(prog.tmpdir / ".gopath"),
         "GOFLAGS": "",
     }
-    proc = _run(
-        [cfg.go_bin, "run", str(src)], tmpdir, input_text,
+    comp = _run(
+        [cfg.go_bin, "build", "-o", str(exe), str(src)], prog.tmpdir, "",
         cfg.run_timeout_seconds + cfg.compile_timeout_seconds,
         cfg.run_timeout_seconds + cfg.compile_timeout_seconds, 0, env=env,
     )
-    ok = proc.returncode == 0
-    return RunResult(
-        language, True, True, True, proc.returncode,
-        _truncate(proc.stdout, cfg.max_output_bytes),
-        _truncate(proc.stderr, cfg.max_output_bytes), False,
-        None if ok else "go run failed",
-    )
+    if comp.returncode != 0:
+        prog.error_result = RunResult(prog.language, True, False, False, comp.returncode, "",
+                                      _truncate(comp.stderr, cfg.max_output_bytes), False,
+                                      "compilation failed")
+        return
+    prog.run_cmd = [str(exe)]
+    prog.run_error = "go program failed"
+    prog.mem_bytes = 0
 
 
-def _run_js(tmpdir, source, input_text, cfg, language) -> RunResult:
+def _prepare_js(prog: Program, source: str) -> None:
+    cfg = prog.cfg
     if shutil.which(cfg.node_bin) is None:
-        return RunResult(language, True, False, False, None, "", "", False, "node not available")
-    src = tmpdir / "main.js"
+        prog.error_result = RunResult(prog.language, True, False, False, None, "", "", False,
+                                      "node not available")
+        return
+    src = prog.tmpdir / "main.js"
     src.write_text(source, encoding="utf-8")
-    proc = _run(
-        [cfg.node_bin, str(src)], tmpdir, input_text,
-        cfg.run_timeout_seconds, cfg.run_timeout_seconds, 0,
-    )
-    return RunResult(
-        language, True, True, True, proc.returncode,
-        _truncate(proc.stdout, cfg.max_output_bytes),
-        _truncate(proc.stderr, cfg.max_output_bytes), False, None,
-    )
+    prog.run_cmd = [cfg.node_bin, str(src)]
+    prog.mem_bytes = 0
 
 
 def normalise_output(text: str) -> str:

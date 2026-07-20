@@ -6,6 +6,7 @@ from codenet_eval.config import VerificationConfig
 from codenet_eval.verification import (
     detect_java_main_class,
     normalise_output,
+    prepare_program,
     run_program,
     verify_divergence,
     verify_function_divergence,
@@ -157,6 +158,55 @@ def test_python2_fallback_runs_py2_only_snippet():
     assert res.clean
     assert res.interpreter == "python2"     # python3 failed, python2 rescued it
     assert res.stdout.strip() == "hi"
+
+
+# --- compile-once / run-many (Program) -------------------------------------
+@pytest.mark.skipif(shutil.which("gcc") is None, reason="gcc required")
+def test_prepare_program_compiles_once_runs_many():
+    # A C program that reads two ints and prints their sum. Compile once via
+    # prepare_program, then run several inputs against the SAME binary.
+    src = C_SUM_LOCAL
+    prog = prepare_program("C", src, ".c", VCFG)
+    try:
+        assert prog.error_result is None
+        exe = prog.tmpdir / "prog"
+        assert exe.is_file()                     # compiled artifact exists
+        mtime = exe.stat().st_mtime_ns
+        for a, b in [(2, 3), (10, 20), (-4, 9)]:
+            res = prog.run(f"{a} {b}\n")
+            assert res.clean, res.error
+            assert res.stdout.strip() == str(a + b)
+        assert exe.stat().st_mtime_ns == mtime   # never recompiled between runs
+    finally:
+        prog.close()
+    assert prog._tmp is None                      # temp dir cleaned up on close
+
+
+@pytest.mark.skipif(shutil.which("gcc") is None, reason="gcc required")
+def test_program_context_manager_cleans_up():
+    with prepare_program("C", C_SUM_LOCAL, ".c", VCFG) as prog:
+        tmpdir = prog.tmpdir
+        assert tmpdir.is_dir()
+        assert prog.run("1 1\n").stdout.strip() == "2"
+    assert not tmpdir.exists()                     # __exit__ removed the temp dir
+
+
+@pytest.mark.skipif(shutil.which("gcc") is None, reason="gcc required")
+def test_prepare_program_compile_error_surfaced_on_every_run():
+    prog = prepare_program("C", "int main(){ this is not C }", ".c", VCFG)
+    try:
+        assert prog.error_result is not None
+        r1, r2 = prog.run("x"), prog.run("y")
+        assert r1.error == "compilation failed" and not r1.clean
+        assert r2.error == "compilation failed"
+        assert r1 is not r2                         # a fresh copy per run
+    finally:
+        prog.close()
+
+
+# A C program summing two ints, defined locally so these tests don't depend on
+# conftest's long-typed variant.
+C_SUM_LOCAL = '#include <stdio.h>\nint main(){int a,b;scanf("%d %d",&a,&b);printf("%d\\n",a+b);return 0;}\n'
 
 
 # --- timeout / process-group robustness ------------------------------------

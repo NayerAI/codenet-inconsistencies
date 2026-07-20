@@ -118,7 +118,8 @@ experiment:
   #    source semantics kept but target tests reject -- the case of interest),
   #    relaxed, consistent, incorrect.
   type: inconsistency
-  max_test_inputs: 40     # transpilation: cap test inputs per unit
+  # transpilation runs ALL of a unit's parsed test inputs; each program is
+  # compiled once and reused, so there is no per-unit input cap.
 
 # Tip: preview any experiment without calling the LLM and count planned calls:
 #   codenet-eval -c config.yaml run --dry-run

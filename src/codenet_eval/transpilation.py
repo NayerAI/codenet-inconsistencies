@@ -36,7 +36,7 @@ from .providers import get_provider
 from .runner import MANIFEST_NAME, RESULTS_NAME, _now
 from .sampling import select_problem_ids
 from .utils import append_jsonl, get_logger, read_jsonl, write_jsonl
-from .verification import normalise_output, run_program
+from .verification import normalise_output, prepare_program
 
 log = get_logger(__name__)
 
@@ -59,7 +59,6 @@ class TranspilationRunner:
             raise FileNotFoundError("HumanEval-X not prepared. Run 'download' first.")
         records = self.provider.load_records()
         languages = self.cfg.languages
-        max_inputs = self.cfg.experiment.max_test_inputs
         log.info("Building transpilation units for languages: %s", ", ".join(languages))
 
         units: list[dict] = []
@@ -67,7 +66,7 @@ class TranspilationRunner:
             py = by_lang.get("Python")
             if not py:
                 continue
-            inputs = parse_test_inputs(py.get("test", "") or "", max_inputs=max_inputs)
+            inputs = parse_test_inputs(py.get("test", "") or "")
             if not inputs:
                 continue
             for src in languages:
@@ -205,27 +204,40 @@ class TranspilationRunner:
         src_w = build_wrapper(src, unit["source_code"], unit["source_declaration"])
         tgt_w = build_wrapper(tgt, unit["target_ref_code"], unit["target_declaration"])
 
+        # Compile each of the three wrapped programs ONCE, then run all test
+        # inputs against the compiled artifacts (recompiling per input was the
+        # dominant cost and made evaluating many inputs prohibitively slow).
+        gen_prog = prepare_program(tgt, gen_w, _EXT[tgt], vcfg)
+        src_prog = prepare_program(src, src_w, _EXT[src], vcfg)
+        tgt_prog = prepare_program(tgt, tgt_w, _EXT[tgt], vcfg)
+
         n_reliable = n_distinguishing = 0
         all_match_t = all_match_s = True
         mismatches = []
-        for args in unit["test_inputs"]:
-            stdin = "".join(json.dumps(a) + "\n" for a in args)
-            g = run_program(tgt, gen_w, _EXT[tgt], stdin, vcfg)
-            s = run_program(src, src_w, _EXT[src], stdin, vcfg)
-            t = run_program(tgt, tgt_w, _EXT[tgt], stdin, vcfg)
-            if not (s.clean and t.clean):
-                continue  # reference unreliable on this input
-            n_reliable += 1
-            s_out, t_out = normalise_output(s.stdout), normalise_output(t.stdout)
-            if s_out != t_out:
-                n_distinguishing += 1
-            g_out = normalise_output(g.stdout) if g.clean else None
-            match_t = g.clean and g_out == t_out
-            match_s = g.clean and g_out == s_out
-            all_match_t = all_match_t and match_t
-            all_match_s = all_match_s and match_s
-            if (not match_t or not match_s) and len(mismatches) < 5:
-                mismatches.append({"input": args, "gen": g_out, "source_ref": s_out, "target_ref": t_out})
+        try:
+            for args in unit["test_inputs"]:
+                stdin = "".join(json.dumps(a) + "\n" for a in args)
+                g = gen_prog.run(stdin)
+                s = src_prog.run(stdin)
+                t = tgt_prog.run(stdin)
+                if not (s.clean and t.clean):
+                    continue  # reference unreliable on this input
+                n_reliable += 1
+                s_out, t_out = normalise_output(s.stdout), normalise_output(t.stdout)
+                if s_out != t_out:
+                    n_distinguishing += 1
+                g_out = normalise_output(g.stdout) if g.clean else None
+                match_t = g.clean and g_out == t_out
+                match_s = g.clean and g_out == s_out
+                all_match_t = all_match_t and match_t
+                all_match_s = all_match_s and match_s
+                if (not match_t or not match_s) and len(mismatches) < 5:
+                    mismatches.append({"input": args, "gen": g_out,
+                                       "source_ref": s_out, "target_ref": t_out})
+        finally:
+            gen_prog.close()
+            src_prog.close()
+            tgt_prog.close()
 
         if n_reliable == 0:
             return {"category": "inconclusive", "reason": "references not runnable on any input",

@@ -168,8 +168,6 @@ class ExperimentConfig:
     #   target vs. source reference on the test inputs -- to find strict
     #   transpilations that HumanEval-X's target tests would (falsely) reject.
     type: str = "inconsistency"
-    # transpilation: cap on test inputs evaluated per unit (from the Python test).
-    max_test_inputs: int = 40
 
 
 @dataclass

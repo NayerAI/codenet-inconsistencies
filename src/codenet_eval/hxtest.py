@@ -16,8 +16,12 @@ import ast
 from typing import Any
 
 
-def parse_test_inputs(test_src: str, max_inputs: int = 40) -> list[list[Any]]:
-    """Return a list of argument lists, one per usable assert in ``test_src``."""
+def parse_test_inputs(test_src: str, max_inputs: int | None = None) -> list[list[Any]]:
+    """Return a list of argument lists, one per usable assert in ``test_src``.
+
+    ``max_inputs`` optionally caps how many are returned; the default (``None``)
+    keeps every distinct literal-argument call to the candidate.
+    """
     try:
         tree = ast.parse(test_src)
     except SyntaxError:
@@ -45,7 +49,7 @@ def parse_test_inputs(test_src: str, max_inputs: int = 40) -> list[list[Any]]:
                 continue
             seen.add(key)
             inputs.append(args)
-            if len(inputs) >= max_inputs:
+            if max_inputs is not None and len(inputs) >= max_inputs:
                 break
     return inputs
 
