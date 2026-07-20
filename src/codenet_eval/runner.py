@@ -141,8 +141,20 @@ class Runner:
             return set()
         keys = set()
         for row in read_jsonl(results_path):
+            if row.get("dry_run"):
+                continue  # dry-run previews never count as completed work
             keys.add(_pair_key(row["problem_id"], row["language_a"], row["language_b"]))
         return keys
+
+    def dry_run(self, run_dir: Path) -> tuple[int, int]:
+        """Count sampled problems and planned LLM calls for the current manifest,
+        building each prompt as a sanity check. Writes nothing; ignores results."""
+        manifest = self.load_manifest(run_dir)
+        calls = 0
+        for mrow, lang_a, lang_b in self._iter_pairs(manifest):
+            self._evaluate_pair(mrow, lang_a, lang_b, client=None)  # builds messages
+            calls += 1
+        return len(manifest), calls
 
     def evaluate(
         self,

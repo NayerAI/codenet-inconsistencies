@@ -105,6 +105,16 @@ class TranspilationRunner:
         log.info("Wrote manifest with %d units -> %d LLM calls", len(rows), len(rows))
         return rows
 
+    def dry_run(self, run_dir: Path) -> tuple[int, int]:
+        """Count sampled units and planned LLM calls (one per unit); build each
+        prompt as a sanity check. Writes nothing; ignores results."""
+        manifest = list(read_jsonl(run_dir / MANIFEST_NAME))
+        for u in manifest:
+            build_transpile_messages(
+                u["source_language"], u["source_code"],
+                u["target_language"], u["target_declaration"])
+        return len(manifest), len(manifest)
+
     # --- stage 2: evaluation -------------------------------------------------
     def evaluate(
         self,
@@ -255,6 +265,8 @@ def _done_keys(results_path: Path) -> set:
         return set()
     keys = set()
     for r in read_jsonl(results_path):
+        if r.get("dry_run"):
+            continue  # dry-run previews never count as completed work
         if {"problem_id", "source_language", "target_language"} <= r.keys():
             keys.add(f"{r['problem_id']}|{r['source_language']}|{r['target_language']}")
     return keys

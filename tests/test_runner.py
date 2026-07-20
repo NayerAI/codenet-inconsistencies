@@ -63,6 +63,28 @@ def test_evaluate_dry_run_makes_no_calls(mini_config, tmp_path):
     assert all(r.get("dry_run") for r in results)
 
 
+def test_dry_run_counts_from_manifest_and_writes_nothing(mini_config, tmp_path):
+    runner = Runner(mini_config)
+    run_dir = tmp_path / "run"
+    runner.sample(run_dir)                      # 2 problems x 2 reference pairs
+    n_samples, n_calls = runner.dry_run(run_dir)
+    assert n_samples == 2
+    assert n_calls == 4
+    # dry_run must not create/pollute results.jsonl (would block a later real run).
+    assert not (run_dir / "results.jsonl").exists()
+
+
+def test_resume_ignores_dry_run_rows(mini_config, tmp_path):
+    # A stale dry-run preview in results.jsonl must NOT count as completed work.
+    runner = Runner(mini_config)
+    run_dir = tmp_path / "run"
+    runner.sample(run_dir)
+    runner.evaluate(run_dir, client=None)       # writes 4 dry_run=True rows
+    assert (run_dir / "results.jsonl").exists()
+    done = runner._existing_keys(run_dir / "results.jsonl")
+    assert done == set()                        # dry rows ignored by resume
+
+
 @pytest.mark.skipif(not TOOLCHAINS, reason="gcc + python3 required for verification")
 def test_evaluate_with_fake_client_and_verification(mini_config, tmp_path):
     runner = Runner(mini_config)

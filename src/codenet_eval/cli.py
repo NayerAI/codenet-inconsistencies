@@ -35,7 +35,7 @@ from .report import (
 )
 from .runner import Runner, default_run_name
 from .transpilation import TranspilationRunner
-from .utils import get_logger, read_jsonl, setup_logging
+from .utils import get_logger, setup_logging
 
 
 def _make_runner(cfg: Config):
@@ -52,13 +52,10 @@ def _summarise(cfg: Config, run_dir: Path) -> tuple[dict, str]:
     return s, format_summary(s)
 
 
-def _print_dry_run(run_dir: Path) -> None:
-    manifest = list(read_jsonl(run_dir / "manifest.jsonl"))
-    results = run_dir / "results.jsonl"
-    planned = sum(1 for _ in read_jsonl(results)) if results.is_file() else 0
+def _print_dry_run(n_samples: int, n_calls: int) -> None:
     print("==================== DRY RUN (no LLM calls) ====================")
-    print(f"sampled units/problems : {len(manifest)}")
-    print(f"planned LLM calls      : {planned}")
+    print(f"sampled units/problems : {n_samples}")
+    print(f"planned LLM calls      : {n_calls}")
     print("===============================================================")
 
 log = get_logger("codenet_eval.cli")
@@ -268,20 +265,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     else:
         latest = _latest_run_name(cfg)
         run_dir = _resolve_run_dir(cfg, latest, create=latest is None)
-    # 'run' is usable standalone: sample first if there is no manifest yet.
-    if args.sample or not (run_dir / "manifest.jsonl").is_file():
+    # 'run' is usable standalone: sample if forced, if dry-running (so the count
+    # reflects the CURRENT config), or if there is no manifest yet.
+    if args.sample or args.dry_run or not (run_dir / "manifest.jsonl").is_file():
         log.info("Sampling for run %s", run_dir.name)
         runner.sample(run_dir)
-    client = None if args.dry_run else _make_client(cfg)
-    runner.evaluate(
-        run_dir, client, limit=args.limit, resume=not args.no_resume, workers=args.workers
-    )
     if args.dry_run:
-        _print_dry_run(run_dir)
-    else:
-        summary, text = _summarise(cfg, run_dir)
-        write_summary(run_dir, summary)
-        print(text)
+        _print_dry_run(*runner.dry_run(run_dir))
+        return 0
+    runner.evaluate(
+        run_dir, _make_client(cfg), limit=args.limit, resume=not args.no_resume, workers=args.workers
+    )
+    summary, text = _summarise(cfg, run_dir)
+    write_summary(run_dir, summary)
+    print(text)
     return 0
 
 
@@ -317,16 +314,15 @@ def cmd_all(args: argparse.Namespace) -> int:
     runner = _make_runner(cfg)
     run_dir = _resolve_run_dir(cfg, args.run_name, create=True)
     runner.sample(run_dir)
-    client = None if args.dry_run else _make_client(cfg)
-    runner.evaluate(
-        run_dir, client, limit=args.limit, resume=not args.no_resume, workers=args.workers
-    )
     if args.dry_run:
-        _print_dry_run(run_dir)
-    else:
-        summary, text = _summarise(cfg, run_dir)
-        write_summary(run_dir, summary)
-        print(text)
+        _print_dry_run(*runner.dry_run(run_dir))
+        return 0
+    runner.evaluate(
+        run_dir, _make_client(cfg), limit=args.limit, resume=not args.no_resume, workers=args.workers
+    )
+    summary, text = _summarise(cfg, run_dir)
+    write_summary(run_dir, summary)
+    print(text)
     return 0
 
 
