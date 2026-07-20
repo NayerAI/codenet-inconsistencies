@@ -17,6 +17,38 @@ class _FakeResp:
         pass
 
 
+class _BadJsonResp:
+    """A 200 whose body is not valid JSON (truncated/HTML/streamed)."""
+    status_code = 200
+    text = "<html>gateway error</html>"
+
+    def json(self):
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+
+def _ok_resp():
+    content = '{"inconsistent": true}'
+    return _FakeResp(200, {"model": "m", "choices": [{"message": {"content": content}}],
+                           "usage": {"total_tokens": 3}})
+
+
+def test_non_json_body_is_retried_then_recovers(monkeypatch):
+    client = OpenRouterClient(LLMConfig(model="m", max_retries=3, json_mode=False), api_key="k")
+    monkeypatch.setattr(client, "_sleep", lambda *a, **k: None)
+    seq = iter([_BadJsonResp(), _BadJsonResp(), _ok_resp()])
+    monkeypatch.setattr(client.session, "post", lambda *a, **k: next(seq))
+    resp = client.complete([{"role": "user", "content": "x"}])
+    assert resp.parsed == {"inconsistent": True}   # recovered on the 3rd attempt
+
+
+def test_non_json_body_exhausts_retries_as_llm_error(monkeypatch):
+    client = OpenRouterClient(LLMConfig(model="m", max_retries=2, json_mode=False), api_key="k")
+    monkeypatch.setattr(client, "_sleep", lambda *a, **k: None)
+    monkeypatch.setattr(client.session, "post", lambda *a, **k: _BadJsonResp())
+    with pytest.raises(LLMError):        # not a raw JSONDecodeError
+        client.complete([{"role": "user", "content": "x"}])
+
+
 def test_client_requires_api_key(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     with pytest.raises(LLMError):

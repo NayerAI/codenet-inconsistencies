@@ -95,7 +95,14 @@ class OpenRouterClient:
             if resp.status_code >= 400:
                 raise LLMError(f"HTTP {resp.status_code}: {resp.text[:500]}")
 
-            data = resp.json()
+            # A 200 with a non-JSON body (truncated/streamed/HTML error page,
+            # gateway hiccup) is transient -- retry it like a 5xx.
+            try:
+                data = resp.json()
+            except ValueError as exc:
+                last_error = LLMError(f"non-JSON response body: {exc}; body[:300]={resp.text[:300]!r}")
+                self._sleep(attempt, "non-JSON response body")
+                continue
             return self._parse_completion(data)
 
         raise LLMError(f"Exhausted {self.cfg.max_retries} retries; last error: {last_error}")
