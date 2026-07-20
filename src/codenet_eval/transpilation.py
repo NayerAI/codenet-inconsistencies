@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
@@ -62,21 +63,33 @@ class TranspilationRunner:
         log.info("Building transpilation units for languages: %s", ", ".join(languages))
 
         units: list[dict] = []
+        n_problems = n_no_python = n_no_inputs = 0
+        wrappable_hist: Counter = Counter()   # #wrappable-languages -> #problems
+        lang_wrappable: Counter = Counter()   # language -> #problems it wraps in
         for num, by_lang in records.items():
+            n_problems += 1
             py = by_lang.get("Python")
             if not py:
+                n_no_python += 1
                 continue
             inputs = parse_test_inputs(py.get("test", "") or "")
             if not inputs:
+                n_no_inputs += 1
                 continue
-            for src in languages:
-                for tgt in languages:
-                    if src == tgt or src not in by_lang or tgt not in by_lang:
-                        continue
-                    src_rec, tgt_rec = by_lang[src], by_lang[tgt]
-                    # Require both reference wrappers to be buildable so we can
-                    # compute oracle outputs deterministically.
-                    if not (_buildable(src, src_rec) and _buildable(tgt, tgt_rec)):
+            # Decide buildability once per (problem, language) -- the reference
+            # wrapper must compile so we can compute oracle outputs -- then form
+            # ordered pairs only among the wrappable languages.
+            wrappable = {
+                lang: by_lang[lang]
+                for lang in languages
+                if lang in by_lang and _buildable(lang, by_lang[lang])
+            }
+            wrappable_hist[len(wrappable)] += 1
+            for lang in wrappable:
+                lang_wrappable[lang] += 1
+            for src, src_rec in wrappable.items():
+                for tgt, tgt_rec in wrappable.items():
+                    if src == tgt:
                         continue
                     units.append({
                         "problem_id": num,
@@ -89,7 +102,23 @@ class TranspilationRunner:
                         "target_ref_code": _code(tgt_rec),
                     })
 
-        log.info("Found %d evaluable transpilation units", len(units))
+        n = len(languages)
+        log.info(
+            "Found %d evaluable transpilation units (ceiling %d = %d problems x %d ordered pairs)",
+            len(units), n_problems * n * (n - 1), n_problems, n * (n - 1),
+        )
+        log.info(
+            "  dropped: %d without a Python reference, %d with no literal test inputs",
+            n_no_python, n_no_inputs,
+        )
+        log.info(
+            "  wrappable-language histogram (langs->problems): %s",
+            {k: wrappable_hist[k] for k in sorted(wrappable_hist)},
+        )
+        log.info(
+            "  per-language wrappable problems: %s",
+            {lang: lang_wrappable.get(lang, 0) for lang in languages},
+        )
         if not units:
             raise RuntimeError("No evaluable transpilation units (check languages / data).")
 
