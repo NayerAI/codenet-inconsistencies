@@ -9,6 +9,8 @@ Subcommands::
     codenet-eval run        # query the LLM per language pair -> results.jsonl
     codenet-eval reverify   # recompute verification verdicts (no LLM calls)
     codenet-eval report     # summarise a run
+    codenet-eval hx-analyze # HumanEval-X: store test inputs + wrappers, measure
+                            #   distinguishing test cases (no LLM calls)
     codenet-eval all        # download + sample + run + report
 
 All commands accept ``--config path/to/config.yaml``.
@@ -305,6 +307,19 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hx_analyze(args: argparse.Namespace) -> int:
+    from .hxanalysis import HumanEvalXAnalysis, format_analysis
+
+    cfg = _load_config(args)
+    try:
+        analysis = HumanEvalXAnalysis(cfg)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    summary = analysis.run(max_problems=args.max_problems, workers=args.workers)
+    print(format_analysis(summary))
+    return 0
+
+
 def cmd_all(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
     try:
@@ -394,6 +409,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only re-apply the rules to stored run data; do not re-execute.",
     )
     p_reverify.set_defaults(func=cmd_reverify)
+
+    p_hx = sub.add_parser(
+        "hx-analyze",
+        help="HumanEval-X: store test inputs + wrappers and measure how many "
+             "test cases are distinguishing (no LLM calls).",
+    )
+    p_hx.add_argument("--max-problems", type=int, default=None,
+                      help="Analyse only the first N problems.")
+    p_hx.add_argument("--workers", type=int, default=None,
+                      help="Parallel workers (overrides execution.workers).")
+    p_hx.set_defaults(func=cmd_hx_analyze)
 
     p_all = sub.add_parser("all", help="download + sample + run + report.")
     p_all.add_argument("--run-name", default=None)

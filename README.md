@@ -429,6 +429,44 @@ codenet-eval reverify --run-name run1 --reclassify-only  # just re-apply the rul
 Use it to apply the exit-status-aware rules (and Python 2 / numpy) to results
 produced by an older version.
 
+### Inspecting HumanEval-X test cases (`hx-analyze`)
+
+`hx-analyze` is a HumanEval-X-only, **no-LLM** command that makes the dataset
+inspectable and measures how discriminating its test cases actually are:
+
+```bash
+codenet-eval -c config/config.yaml hx-analyze              # dataset.type: humaneval_x
+codenet-eval -c config/config.yaml hx-analyze --max-problems 20 --workers 8
+```
+
+It writes everything under `data/humaneval-x/analysis/`:
+
+```
+analysis/
+  test_inputs/<id>.json          # the literal args parsed from each Python `test`
+  wrappers/<id>/<language><ext>   # the exact stdin/stdout wrapper that gets run
+  problems.jsonl                  # per-problem: n_inputs, n_reliable, n_distinguishing, ...
+  summary.json                    # dataset-wide totals + per-language-pair breakdown
+```
+
+Each language's reference wrapper is compiled once and run on every test input.
+A test input is **distinguishing** when the reference implementations — all
+exiting cleanly — produce more than one distinct canonical output, i.e. the
+languages already disagree on that input. The summary reports how many test
+cases are distinguishing overall and **which language pairs** they separate, so
+you can see how many test cases are even capable of exposing a cross-language
+inconsistency (independent of any model):
+
+```
+test inputs (total)           : 2000
+  comparable (>=2 clean refs) : 1950
+  distinguishing              : 130  (6.7% of comparable)
+problems w/ >=1 distinguishing: 40
+distinguishing inputs by language pair:
+  C++|Python                     70 inputs across 25 problems
+  ...
+```
+
 ---
 
 ## Dataset notes
